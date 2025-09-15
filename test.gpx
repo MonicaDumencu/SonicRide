@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="RideTrack Demo" xmlns="http://www.topografix.com/GPX/1/1">
+  <metadata>
+    <name>Sample Ride</name>
+    <time>2025-09-15T07:00:00Z</time>
+  </metadata>
+  <trk>
+    <name>Calimoto Export - Sample Ride</name>
+    <trkseg>
+      <trkpt lat="50.087451" lon="14.420671">
+        <ele>200.0</ele>
+        <time>2025-09-15T07:00:00Z</time>
+      </trkpt>
+      <trkpt lat="50.088500" lon="14.425000">
+        <ele>205.0</ele>
+        <time>2025-09-15T07:00:30Z</time>
+      </trkpt>
+      <trkpt lat="50.089800" lon="14.430500">
+        <ele>210.0</ele>
+        <time>2025-09-15T07:01:00Z</time>
+      </trkpt>
+      <trkpt lat="50.091200" lon="14.435800">
+        <ele>220.0</ele>
+        <time>2025-09-15T07:01:30Z</time>
+      </trkpt>
+      <trkpt lat="50.092700" lon="14.441000">
+        <ele>230.0</ele>
+        <time>2025-09-15T07:02:00Z</time>
+      </trkpt>
+      <trkpt lat="50.094000" lon="14.446500">
+        <ele>240.0</ele>
+        <time>2025-09-15T07:02:30Z</time>
+      </trkpt>
+      <trkpt lat="50.095500" lon="14.452000">
+        <ele>250.0</ele>
+        <time>2025-09-15T07:03:00Z</time>
+      </trkpt>
+      <trkpt lat="50.097000" lon="14.457500">
+        <ele>260.0</ele>
+        <time>2025-09-15T07:03:30Z</time>
+      </trkpt>
+      <trkpt lat="50.098500" lon="14.463000">
+        <ele>270.0</ele>
+        <time>2025-09-15T07:04:00Z</time>
+      </trkpt>
+      <trkpt lat="50.100000" lon="14.468500">
+        <ele>280.0</ele>
+        <time>2025-09-15T07:04:30Z</time>
+      </trkpt>
+    </trkseg>
+  </trk>
+</gpx>
