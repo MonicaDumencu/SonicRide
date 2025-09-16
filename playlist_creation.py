@@ -52,29 +52,51 @@ def mood_params(mood: str):
         return ["rock", "edm"], 0.85, 130
     if mood == "moderate":
         return ["pop", "indie"], 0.6, 110
-    return ["jazz", "chill"], 0.4, 90
+    return ["jazz", "acoustic"], 0.4, 90
 
 
 def validate_seed_genres(sp, desired, needed=2):
     """Return a list of valid seed genres filtered from desired. If insufficient,
     augment with other available seeds. Ensures at least 1 (preferably 'needed')."""
-    try:
-        available = set(sp.recommendation_genre_seeds())
-    except Exception:
-        # Fallback static minimal list likely to exist
-        available = {"rock", "pop", "indie", "jazz", "edm", "hip-hop", "acoustic", "ambient"}
+    # Use a curated list of definitely valid genres instead of API call
+    # These are based on the official Spotify genre seeds documentation
+    available = {
+        "acoustic", "afrobeat", "alt-rock", "alternative", "ambient", "blues", "bossanova", "brazil",
+        "breakbeat", "british", "chill", "classical", "club", "country", "dance", "deep-house", 
+        "disco", "drum-and-bass", "dub", "dubstep", "edm", "electronic", "folk", "funk", "garage",
+        "gospel", "groove", "grunge", "hip-hop", "house", "idm", "indie", "indie-pop", "jazz",
+        "latin", "metal", "new-age", "pop", "punk", "r-n-b", "reggae", "rock", "soul", "techno",
+        "trance", "world-music"
+    }
+    
     valid = [g for g in desired if g in available]
+    print(f"[DEBUG] Desired genres: {desired}, Valid from desired: {valid}")
+    
     if len(valid) < 1:
-        # pick a safe default
-        valid = ["rock"]
+        # pick safe defaults based on mood
+        fallback_map = {
+            ("jazz", "acoustic"): ["jazz", "acoustic"],
+            ("pop", "indie"): ["pop", "indie"],  
+            ("rock", "edm"): ["rock", "electronic"]
+        }
+        desired_tuple = tuple(sorted(desired))
+        valid = fallback_map.get(desired_tuple, ["pop", "rock"])
+        print(f"[DEBUG] No valid genres from desired, using fallback: {valid}")
+    
     # If we want more variety and have room, add others from available
     if len(valid) < needed:
-        for g in sorted(available):
-            if g not in valid:
-                valid.append(g)
-            if len(valid) >= needed:
-                break
-    return valid
+        additional = []
+        fallback_genres = ["pop", "rock", "electronic", "indie", "jazz", "acoustic"]
+        for g in fallback_genres:
+            if g not in valid and g in available:
+                additional.append(g)
+                if len(valid) + len(additional) >= needed:
+                    break
+        valid.extend(additional)
+        if additional:
+            print(f"[DEBUG] Added additional genres for variety: {additional}")
+    
+    return valid[:needed]  # Ensure we don't exceed the limit
 
 
 def main():
@@ -114,7 +136,7 @@ def main():
 
     client_id = os.getenv("SPOTIFY_CLIENT_ID")
     client_secret = os.getenv("SPOTIFY_CLIENT_SECRET")
-    redirect_uri = args.redirect_uri or os.getenv("SPOTIFY_REDIRECT_URI", "http://localhost:8888/callback")
+    redirect_uri = args.redirect_uri or os.getenv("SPOTIFY_REDIRECT_URI", "http://127.0.0.1:8888/callback")
 
     if args.debug:
         print(f"[DEBUG] dotenv path: {_dotenv_path}")
@@ -137,73 +159,107 @@ def main():
         print(hint, file=sys.stderr)
         sys.exit(1)
 
+    # Try using Client Credentials first for recommendations, then OAuth for playlist creation
+    client_creds_sp = spotipy.Spotify(client_credentials_manager=spotipy.SpotifyClientCredentials(
+        client_id=client_id,
+        client_secret=client_secret
+    ))
+    
+    # OAuth for playlist creation (requires user permissions)
     scope = "playlist-modify-private user-read-private"
     if args.public:
         scope = scope.replace("playlist-modify-private", "playlist-modify-public")
 
-    sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
+    oauth_sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
         client_id=client_id,
         client_secret=client_secret,
         redirect_uri=redirect_uri,
         scope=scope
     ))
+    
+    # Use client credentials for recommendations, OAuth for user operations
+    sp = oauth_sp  # For compatibility with existing code
 
     if args.debug:
+        # Test Client Credentials
         try:
-            me = sp.me()
-            print(f"[DEBUG] Authenticated user id: {me.get('id')}")
+            search_test = client_creds_sp.search("test", type="track", limit=1)
+            print(f"[DEBUG] Client Credentials working - search returned {len(search_test['tracks']['items'])} items")
         except Exception as e:
-            print(f"[DEBUG] Failed fetching current user: {e}", file=sys.stderr)
+            print(f"[DEBUG] Client Credentials failed: {e}", file=sys.stderr)
+            
+        # Test OAuth
+        try:
+            me = oauth_sp.me()
+            print(f"[DEBUG] OAuth working - user id: {me.get('id')}")
+        except Exception as e:
+            print(f"[DEBUG] OAuth failed: {e}", file=sys.stderr)
 
 
-    seed_genres = validate_seed_genres(sp, seed_genres, needed=2)
+    seed_genres = validate_seed_genres(client_creds_sp, seed_genres, needed=2)
     print(f"Requesting {args.limit} recommendations for genres={seed_genres}, energy={target_energy}, tempo={target_tempo}")
-    try:
-        rec = sp.recommendations(
-            seed_genres=seed_genres,
-            limit=args.limit,
-            target_energy=target_energy,
-            target_tempo=target_tempo
-        )
-    except Exception as e:
-        if args.debug:
-            # Raw request attempt
-            import requests
-            from spotipy.oauth2 import SpotifyOAuth as _So
-            # get token directly
-            # access underlying auth manager via sp.auth_manager
-            token_info = getattr(sp.auth_manager, 'cache_handler', None)
-            print(f"[DEBUG] Recommendation failure: {e}")
-            try:
-                auth_mgr = sp.auth_manager
-                access_token = auth_mgr.get_access_token(as_dict=False)
-                print(f"[DEBUG] Access token length: {len(access_token)}")
-                hdrs = {"Authorization": f"Bearer {access_token}"}
-                test_url = "https://api.spotify.com/v1/recommendations/available-genre-seeds"
-                r = requests.get(test_url, headers=hdrs, timeout=10)
-                print(f"[DEBUG] Direct genre seeds status: {r.status_code}")
-                print(f"[DEBUG] Direct genre seeds body (truncated 300): {r.text[:300]}")
-            except Exception as ie:
-                print(f"[DEBUG] Raw token/genre fetch failed: {ie}")
-        print(f"Error fetching recommendations: {e}", file=sys.stderr)
-        sys.exit(1)
-
-    tracks = rec.get('tracks', [])
+    
+    # Note: Recommendations API requires 250k+ MAUs as of May 2025 - skip directly to search
+    tracks = []
+    print("[DEBUG] Note: Spotify Recommendations API requires 250k+ MAUs as of May 2025")
+    print("📻 Using search-based track selection...")
+    
+    # Use search to find tracks by genre
+    search_queries = [
+            f"genre:{genre}" for genre in seed_genres
+        ] + [
+            f"{genre} music" for genre in seed_genres
+        ] + [
+            "instrumental", "jazz music", "acoustic guitar", "ambient music", "chill music"
+        ]
+    
+    tracks = []
+    tracks_found = set()  # Avoid duplicates
+    
+    for query in search_queries:
+            if len(tracks) >= args.limit:
+                break
+                
+        try:
+            print(f"[DEBUG] Searching for: {query}")
+            search_result = client_creds_sp.search(
+                q=query, 
+                type='track', 
+                limit=min(10, args.limit - len(tracks))
+            )
+            
+            for track in search_result['tracks']['items']:
+                if len(tracks) >= args.limit:
+                    break
+                if track['id'] not in tracks_found:
+                    tracks.append(track)
+                    tracks_found.add(track['id'])
+                    
+        except Exception as search_error:
+            print(f"[DEBUG] Search query '{query}' failed: {search_error}")
+            continue
+    
     if not tracks:
-        print("No tracks returned from Spotify recommendations.", file=sys.stderr)
+        print("❌ Search-based track selection failed", file=sys.stderr)
+        sys.exit(1)
+    
+    print(f"✅ Found {len(tracks)} tracks via search")
+
+    if not tracks:
+        print("No tracks found.", file=sys.stderr)
         sys.exit(1)
 
     track_uris = [t['uri'] for t in tracks]
-    user_id = sp.me()['id']
+    user_id = oauth_sp.me()['id']
     playlist_name = f"{args.name_prefix} ({mood.capitalize()})"
-    playlist = sp.user_playlist_create(
+    playlist = oauth_sp.user_playlist_create(
         user=user_id,
         name=playlist_name,
         public=args.public,
         description="Auto-generated by RideTrack based on ride metrics"
     )
 
-    sp.playlist_add_items(playlist_id=playlist['id'], items=track_uris)
+    oauth_sp.playlist_add_items(playlist_id=playlist['id'], items=track_uris)
 
     print(f"✅ Playlist created: {playlist['external_urls']['spotify']}")
     print("Tracks added:")
