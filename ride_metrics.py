@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """
-ride_metrics.py — Parse a Calimoto GPX ride and compute speed, altitude, and approximate lean angle.
+ride_metrics.py — Parse a Calimoto GPX ride and compute speed, altitude, and realistic motorcycle lean angles.
 
 Outputs a CSV with:
 timestamp, lat, lon, altitude_m, speed_kmh, lean_angle_deg, turn_radius_m, dt_s, distance_m
+
+Lean angle calculation uses physics (centripetal force) but applies realistic street riding caps:
+- City/tight corners: ~25° (cautious street riding)
+- Normal corners: ~32° (typical spirited street riding)
+- Country roads: ~38° (aggressive street riding)
+- Highway sweepers: up to 40° (maximum realistic street limit)
 
 Usage:
   python ride_metrics.py --input ride.gpx --output metrics.csv --smooth-speed 5 --smooth-lean 5
@@ -115,11 +121,11 @@ def extract_points_from_gpx(path: str) -> List[dict]:
     return points
 
 def compute_metrics(points: List[dict],
-                    min_dt_s: float = 0.4,
+                    min_dt_s: float = 1.0,
                     min_move_speed_kmh: float = 3.0,
                     smooth_speed_window: int = 5,
                     smooth_lean_window: int = 5,
-                    max_lean_deg_cap: Optional[float] = 60.0) -> List[dict]:
+                    max_lean_deg_cap: Optional[float] = 40.0) -> List[dict]:
     """
     For each point, compute:
       - distance to previous point (m)
@@ -155,8 +161,11 @@ def compute_metrics(points: List[dict],
             distance_m = haversine_distance(prev['lat'], prev['lon'], cur['lat'], cur['lon'])
             if cur['time'] and prev['time']:
                 dt_s = (cur['time'] - prev['time']).total_seconds()
-                if dt_s and dt_s > min_dt_s:
-                    speed_kmh = (distance_m / dt_s) * 3.6
+                # Only calculate speed if we have sufficient time difference and reasonable distance
+                if dt_s and dt_s >= min_dt_s and distance_m is not None:
+                    calculated_speed = (distance_m / dt_s) * 3.6
+                    # Apply realistic speed cap for European road conditions (max ~200 km/h)
+                    speed_kmh = min(calculated_speed, 200.0) if calculated_speed > 0 else None
 
         # turn radius and lean
         turn_radius_m = None
@@ -165,10 +174,31 @@ def compute_metrics(points: List[dict],
             turn_radius_m = turn_radius_from_three_points(prev, cur, nxt)
             if turn_radius_m and turn_radius_m > 0:
                 v = speed_kmh / 3.6  # m/s
-                lean_angle_rad = math.atan((v*v) / (turn_radius_m * G))
-                lean_angle_deg = math.degrees(lean_angle_rad)
-                if max_lean_deg_cap is not None:
-                    lean_angle_deg = min(lean_angle_deg, max_lean_deg_cap)
+                # Only calculate lean if speed is reasonable (between 10-180 km/h for meaningful lean)
+                if 10.0 <= speed_kmh <= 180.0:
+                    # Calculate theoretical lean angle from physics
+                    theoretical_lean_rad = math.atan((v*v) / (turn_radius_m * G))
+                    theoretical_lean_deg = math.degrees(theoretical_lean_rad)
+                    
+                    # Apply realistic caps for street riding:
+                    # - Tight city corners: 25-30° (cautious street riding)
+                    # - Normal corners: 30-35° (typical spirited street riding)
+                    # - Highway sweepers: up to 40° (aggressive but realistic street limit)
+                    if turn_radius_m < 30:  # Very tight city/parking lot turns
+                        max_realistic = 25.0
+                    elif turn_radius_m < 100:  # Normal street corners
+                        max_realistic = 32.0
+                    elif turn_radius_m < 300:  # Spirited country road corners
+                        max_realistic = 38.0
+                    else:  # Highway on-ramps and sweeping curves
+                        max_realistic = 40.0
+                    
+                    # Use the smaller of theoretical physics or realistic riding limit
+                    lean_angle_deg = min(theoretical_lean_deg, max_realistic)
+                    
+                    # Final safety cap
+                    if max_lean_deg_cap is not None:
+                        lean_angle_deg = min(lean_angle_deg, max_lean_deg_cap)
 
         out.append({
             'time': cur['time'].isoformat() if cur['time'] else None,
@@ -182,9 +212,32 @@ def compute_metrics(points: List[dict],
             'lean_angle_deg_raw': lean_angle_deg,
         })
 
-    # Second pass: smoothing
+    # Second pass: outlier removal and smoothing
     speeds = [row['speed_kmh_raw'] for row in out]
     leans  = [row['lean_angle_deg_raw'] for row in out]
+    
+    # Remove extreme outliers in speed data
+    valid_speeds = [s for s in speeds if s is not None and 0 <= s <= 200]
+    if valid_speeds:
+        # Calculate reasonable bounds (mean ± 3 standard deviations)
+        import statistics
+        mean_speed = statistics.mean(valid_speeds)
+        try:
+            std_speed = statistics.stdev(valid_speeds) if len(valid_speeds) > 1 else 0
+            max_reasonable = min(200.0, mean_speed + 3 * std_speed)
+            min_reasonable = max(0.0, mean_speed - 3 * std_speed)
+        except:
+            max_reasonable, min_reasonable = 200.0, 0.0
+            
+        # Filter out unrealistic speeds
+        speeds_filtered = []
+        for s in speeds:
+            if s is not None and min_reasonable <= s <= max_reasonable:
+                speeds_filtered.append(s)
+            else:
+                speeds_filtered.append(None)
+        speeds = speeds_filtered
+    
     speeds_sm = moving_average(speeds, smooth_speed_window) if smooth_speed_window > 1 else speeds
     leans_sm  = moving_average(leans, smooth_lean_window)   if smooth_lean_window  > 1 else leans
 
@@ -219,9 +272,9 @@ def main():
     ap.add_argument("--output", "-o", required=True, help="Output CSV path.")
     ap.add_argument("--smooth-speed", type=int, default=5, help="Moving average window for speed (odd number recommended).")
     ap.add_argument("--smooth-lean", type=int, default=5, help="Moving average window for lean angle (odd number recommended).")
-    ap.add_argument("--min-dt", type=float, default=0.4, help="Minimum dt (s) to compute speed (avoid noise).")
+    ap.add_argument("--min-dt", type=float, default=1.0, help="Minimum dt (s) to compute speed (avoid noise).")
     ap.add_argument("--min-speed", type=float, default=3.0, help="Minimum speed (km/h) to compute lean.")
-    ap.add_argument("--max-lean", type=float, default=60.0, help="Cap lean angle to this maximum (deg); set -1 to disable.")
+    ap.add_argument("--max-lean", type=float, default=40.0, help="Cap lean angle to this maximum (deg) for street riding; set -1 to disable.")
     args = ap.parse_args()
 
     points = extract_points_from_gpx(args.input)

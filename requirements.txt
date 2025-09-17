@@ -2,3 +2,5 @@ gpxpy
 spotipy
 python-dotenv
 pandas
+requests
+polyline
