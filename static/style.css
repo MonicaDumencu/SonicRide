@@ -755,6 +755,19 @@ body {
     font-size: 28px;
     color: white;
     flex-shrink: 0;
+    overflow: hidden;
+}
+
+.playlist-cover-image {
+    width: 64px;
+    height: 64px;
+    border-radius: var(--border-radius);
+    object-fit: cover;
+    transition: transform 0.2s ease;
+}
+
+.playlist-cover-image:hover {
+    transform: scale(1.05);
 }
 
 .playlist-details h3 {

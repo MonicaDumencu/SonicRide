@@ -587,7 +587,29 @@ def create_playlist(
         # Continue without cover - not a critical failure
         pass
 
-    return playlist["external_urls"]["spotify"]
+    # Get updated playlist info with cover image
+    try:
+        updated_playlist = oauth_sp.playlist(playlist["id"])
+        return {
+            'url': playlist["external_urls"]["spotify"],
+            'name': updated_playlist["name"],
+            'id': updated_playlist["id"],
+            'image_url': updated_playlist["images"][0]["url"] if updated_playlist["images"] else None,
+            'description': updated_playlist["description"],
+            'tracks_total': updated_playlist["tracks"]["total"]
+        }
+    except Exception as e:
+        if debug:
+            print(f"[DEBUG] Failed to get updated playlist info: {e}")
+        # Fallback to basic info
+        return {
+            'url': playlist["external_urls"]["spotify"],
+            'name': playlist_name,
+            'id': playlist["id"],
+            'image_url': None,
+            'description': description,
+            'tracks_total': len(tracks)
+        }
 
 
 def analyze_playlist_themes(tracks: list, genres: list, mood: str) -> dict:
@@ -1124,7 +1146,7 @@ Examples:
 
     # Create playlist
     try:
-        playlist_url = create_playlist(
+        playlist_info = create_playlist(
             oauth_sp,
             tracks,
             mood,
@@ -1136,15 +1158,41 @@ Examples:
             debug=args.debug,
         )
 
+        # Handle both old string format and new dict format for backward compatibility
+        if isinstance(playlist_info, dict):
+            playlist_url = playlist_info['url']
+            playlist_name = playlist_info['name']
+            playlist_image = playlist_info.get('image_url')
+        else:
+            # Fallback for old format
+            playlist_url = playlist_info
+            playlist_name = f"{args.name_prefix} ({mood.capitalize()})"
+            playlist_image = None
+
         print(f"🎶 Playlist created: {playlist_url}")
+        print(f"📝 Playlist name: {playlist_name}")
+        if playlist_image:
+            print(f"🖼️ Playlist image: {playlist_image}")
+        
+        # Calculate total playlist duration
+        total_duration_ms = sum(track.get('duration_ms', 0) for track in tracks)
+        total_minutes = total_duration_ms // 60000
+        total_seconds = (total_duration_ms % 60000) // 1000
+        
+        # Output playlist statistics for web app parsing
+        print(f"📊 {len(tracks)} tracks added")
+        print(f"⏱️ Total duration: {total_minutes}m {total_seconds}s")
 
         if args.debug:
             print("\n📝 Tracks added:")
             for i, track in enumerate(tracks, 1):
                 artist_names = ", ".join(a["name"] for a in track["artists"])
-                print(f"   {i:2d}. {track['name']} by {artist_names}")
+                duration_ms = track.get('duration_ms', 0)
+                duration_min = duration_ms // 60000
+                duration_sec = (duration_ms % 60000) // 1000
+                print(f"   {i:2d}. {track['name']} by {artist_names} ({duration_min:2d}:{duration_sec:02d})")
         else:
-            print(f"📝 Added {len(tracks)} tracks to your {mood} " f"riding playlist")
+            print(f"📝 Added {len(tracks)} tracks to your {mood} riding playlist")
 
     except Exception as e:
         print(f"❌ Failed to create playlist: {e}", file=sys.stderr)

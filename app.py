@@ -244,24 +244,35 @@ class ProcessingPipeline:
         lines = output.split('\n')
         for line in lines:
             if 'Playlist created:' in line:
-                # Extract both name and URL from the "Playlist created: URL" line
+                # Extract URL from the "🎶 Playlist created: URL" line
                 url_part = line.split('Playlist created:')[-1].strip()
                 playlist_info['url'] = url_part
-                # Try to extract playlist name from URL or use a default
-                if 'open.spotify.com' in url_part:
-                    playlist_info['name'] = 'SonicRide Playlist'
-                else:
-                    playlist_info['name'] = url_part
+            elif 'Playlist name:' in line:
+                # Extract name from the "📝 Playlist name: Name" line
+                name_part = line.split('Playlist name:')[-1].strip()
+                playlist_info['name'] = name_part
+            elif 'Playlist image:' in line:
+                # Extract image URL from the "🖼️ Playlist image: URL" line
+                image_part = line.split('Playlist image:')[-1].strip()
+                playlist_info['image_url'] = image_part
             elif 'Playlist URL:' in line:
                 playlist_info['url'] = line.split('Playlist URL:')[-1].strip()
-            elif 'tracks added' in line:
+            elif 'tracks added' in line and line.strip().split()[0].isdigit():
+                # Parse "📊 5 tracks added" format
                 try:
-                    playlist_info['tracks_count'] = int(line.split()[0])
+                    playlist_info['tracks_count'] = int(line.strip().split()[1])
                 except:
                     pass
             elif 'Total duration:' in line:
-                playlist_info['duration'] = line.split('Total duration:')[-1].strip()
+                # Parse "⏱️ Total duration: 15m 30s" format
+                duration_part = line.split('Total duration:')[-1].strip()
+                playlist_info['duration'] = duration_part
         
+        # Set default name if not found
+        if playlist_info['name'] == 'Unknown' and 'open.spotify.com' in playlist_info.get('url', ''):
+            playlist_info['name'] = 'SonicRide Playlist'
+        
+        logger.info(f"Parsed playlist info: {playlist_info}")
         return playlist_info
 
 def allowed_file(filename):

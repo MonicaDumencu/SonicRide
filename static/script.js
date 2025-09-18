@@ -273,6 +273,15 @@ class SonicRideApp {
                 playlistUrl.href = info.url;
                 playlistUrl.style.display = 'inline-flex';
             }
+            
+            // Update playlist icon with actual image if available
+            const playlistIcon = document.querySelector('.playlist-icon');
+            if (playlistIcon && info.image_url) {
+                playlistIcon.innerHTML = `<img src="${info.image_url}" alt="Playlist Cover" class="playlist-cover-image">`;
+            } else if (playlistIcon) {
+                // Fallback to Spotify icon
+                playlistIcon.innerHTML = '<i class="fab fa-spotify"></i>';
+            }
         }
 
         // Update download links
