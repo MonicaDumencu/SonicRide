@@ -117,4 +117,4 @@ def analyze_ride(csv_file):
         print(f"   Performance: Avg {avg_speed:.1f} km/h, Max lean {max_lean:.1f}°")
 
 if __name__ == "__main__":
-    analyze_ride("trip1_complete_metrics.csv")
+    analyze_ride("trip2_speedlimits_metrics.csv")

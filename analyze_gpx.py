@@ -5,6 +5,8 @@ GPX analysis script - check the raw GPX data for timing and distance patterns.
 
 import gpxpy
 import math
+import argparse
+import sys
 from datetime import datetime
 
 def haversine_distance(lat1, lon1, lat2, lon2):
@@ -107,4 +109,25 @@ def analyze_gpx_raw(gpx_file):
         print("   ✅ Speed variation looks normal")
 
 if __name__ == "__main__":
-    analyze_gpx_raw("gpx/trip1_complete.gpx")
+    parser = argparse.ArgumentParser(
+        description="Analyze GPX file for timing and distance patterns",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python analyze_gpx.py gpx/trip1_timestamped.gpx
+  python analyze_gpx.py gpx/trip2_timestamped.gpx
+  python analyze_gpx.py my_ride.gpx
+        """
+    )
+    parser.add_argument("gpx_file", help="Path to GPX file to analyze")
+    
+    args = parser.parse_args()
+    
+    try:
+        analyze_gpx_raw(args.gpx_file)
+    except FileNotFoundError:
+        print(f"❌ Error: GPX file not found: {args.gpx_file}", file=sys.stderr)
+        sys.exit(1)
+    except Exception as e:
+        print(f"❌ Error analyzing GPX: {e}", file=sys.stderr)
+        sys.exit(1)

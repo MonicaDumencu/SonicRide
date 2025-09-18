@@ -46,6 +46,10 @@ except ImportError:
 ELEVATION_API_URL = "https://api.open-elevation.com/api/v1/lookup"
 MAX_ELEVATION_BATCH = 100  # Max points per elevation API request
 
+# Overpass API configuration for speed limits
+OVERPASS_API_URL = "https://overpass-api.de/api/interpreter"
+MAX_OVERPASS_BATCH = 50  # Max points per Overpass query to avoid timeouts
+
 
 # Default GPX folder relative to script location
 GPX_FOLDER = Path(__file__).parent / "gpx"
@@ -277,7 +281,8 @@ class GPXTimestampGenerator:
             return {'code': 'NoMatch'}
             
     def calculate_timestamps(self, points: List[Tuple[float, float, Optional[float]]], 
-                           osrm_data: dict, start_time: datetime) -> List[datetime]:
+                           osrm_data: dict, start_time: datetime, 
+                           speed_limits: List[Optional[int]] = None) -> List[datetime]:
         """
         Calculate timestamps for each track point based on OSRM durations.
         
@@ -359,22 +364,48 @@ class GPXTimestampGenerator:
             
             # Apply realistic speed variations for each route segment
             for i, distance in enumerate(distances):
-                # Start with base speed
-                speed = base_speed
+                # Check if we have speed limit data for this segment
+                segment_speed_limit = None
+                if speed_limits and i < len(speed_limits) and speed_limits[i]:
+                    segment_speed_limit = speed_limits[i]
                 
-                # Add realistic variations based on segment characteristics
-                if distance < 10:  # Very short segment - likely tight turn or intersection
-                    speed *= 0.5  # Much slower for very tight areas
-                elif distance < 30:  # Short segment - tight turn
-                    speed *= 0.7  # Slower for tight areas  
-                elif distance > 150:  # Long segment - likely straight road or highway
-                    speed *= 1.3  # Faster for straight sections
-                elif distance > 80:  # Medium-long segment - country road
-                    speed *= 1.1  # Slightly faster
+                if segment_speed_limit:
+                    # Use speed limit as base, apply motorcycle riding factor
+                    if segment_speed_limit <= 50:  # Urban roads
+                        target_speed = segment_speed_limit * 0.8  # Slightly under limit in city
+                    elif segment_speed_limit <= 90:  # Country roads  
+                        target_speed = segment_speed_limit * 0.9  # Close to limit
+                    else:  # Highways
+                        target_speed = segment_speed_limit * 0.95  # Very close to limit
+                    
+                    speed = target_speed / 3.6  # Convert to m/s
+                    
+                    if self.debug and i < 10:  # Show first 10 for verification
+                        print(f"   Segment {i+1}: Using speed limit {segment_speed_limit} km/h -> {target_speed:.1f} km/h")
+                        
+                else:
+                    # Fallback to distance-based estimation with enhanced multipliers
+                    speed = base_speed
+                    
+                    if distance < 10:  # Very short segment - likely tight turn or intersection
+                        speed *= 0.5  # Much slower for very tight areas
+                    elif distance < 30:  # Short segment - tight turn
+                        speed *= 0.7  # Slower for tight areas  
+                    elif distance > 200:  # Very long segment - likely highway
+                        speed *= 2.0  # Much faster for highways (up to ~100 km/h)
+                    elif distance > 100:  # Long segment - likely straight road  
+                        speed *= 1.6  # Faster for straight sections (~80 km/h)
+                    elif distance > 50:  # Medium segment - country road
+                        speed *= 1.2  # Slightly faster (~60 km/h)
                 
-                # Add some randomness to avoid perfect uniformity (±10%)
-                import random
-                variation = 0.9 + (random.random() * 0.2)  # 0.9 to 1.1 multiplier
+                # Apply segment-specific variations (traffic, turns, etc.)
+                if distance < 20:  # Very short - likely intersection/turn
+                    import random
+                    variation = 0.7 + (random.random() * 0.3)  # 0.7 to 1.0 (slower)
+                else:
+                    import random  
+                    variation = 0.9 + (random.random() * 0.2)  # 0.9 to 1.1 (normal variation)
+                
                 speed *= variation
                 
                 # Calculate time for this segment
@@ -513,6 +544,120 @@ class GPXTimestampGenerator:
                 print(f"   Elevation fetch failed: {e}")
                 print("   Continuing without elevation data...")
             return points
+    
+    def fetch_speed_limits(self, points: List[Tuple[float, float, Optional[float]]]) -> List[Optional[int]]:
+        """
+        Fetch speed limits for route points using Overpass API.
+        
+        Args:
+            points: List of (lat, lon, elevation) tuples
+            
+        Returns:
+            List of speed limits in km/h (None if not available)
+        """
+        if self.debug:
+            print(f"🚦 Fetching speed limits for {len(points)} points...")
+            
+        speed_limits = [None] * len(points)
+        
+        try:
+            # Process in batches to avoid Overpass API timeouts
+            for i in range(0, len(points), MAX_OVERPASS_BATCH):
+                batch_points = points[i:i + MAX_OVERPASS_BATCH]
+                
+                if self.debug and len(points) > MAX_OVERPASS_BATCH:
+                    batch_num = i // MAX_OVERPASS_BATCH + 1
+                    total_batches = (len(points) + MAX_OVERPASS_BATCH - 1) // MAX_OVERPASS_BATCH
+                    print(f"   Fetching speed limits batch {batch_num}/{total_batches} ({len(batch_points)} points)...")
+                
+                # Build Overpass query to find nearest roads with speed limits
+                bbox_coords = []
+                for lat, lon, _ in batch_points:
+                    # Create small bounding box around each point (±0.001 degrees ≈ ±100m)
+                    bbox_coords.extend([lat - 0.001, lon - 0.001, lat + 0.001, lon + 0.001])
+                
+                # Find min/max for overall bounding box
+                min_lat = min(bbox_coords[::4])
+                min_lon = min(bbox_coords[1::4])  
+                max_lat = max(bbox_coords[2::4])
+                max_lon = max(bbox_coords[3::4])
+                
+                # Overpass query to get roads with speed limits in the area
+                overpass_query = f"""
+                [out:json][timeout:30];
+                (
+                  way["highway"]["maxspeed"]({min_lat},{min_lon},{max_lat},{max_lon});
+                );
+                out geom;
+                """
+                
+                try:
+                    response = requests.post(
+                        OVERPASS_API_URL,
+                        data=overpass_query,
+                        timeout=30,
+                        headers={'Content-Type': 'text/plain'}
+                    )
+                    response.raise_for_status()
+                    
+                    data = response.json()
+                    roads = data.get('elements', [])
+                    
+                    if self.debug:
+                        print(f"     Found {len(roads)} roads with speed limits in batch")
+                    
+                    # Match each point to nearest road with speed limit
+                    for j, (lat, lon, _) in enumerate(batch_points):
+                        closest_speed = None
+                        min_distance = float('inf')
+                        
+                        for road in roads:
+                            if 'geometry' in road and 'tags' in road:
+                                maxspeed = road['tags'].get('maxspeed')
+                                if maxspeed:
+                                    # Find closest point on road geometry
+                                    for node in road['geometry']:
+                                        road_lat, road_lon = node['lat'], node['lon']
+                                        # Simple distance calculation
+                                        distance = ((lat - road_lat) ** 2 + (lon - road_lon) ** 2) ** 0.5
+                                        if distance < min_distance:
+                                            min_distance = distance
+                                            # Parse speed limit (handle various formats)
+                                            try:
+                                                if maxspeed.isdigit():
+                                                    closest_speed = int(maxspeed)
+                                                elif maxspeed.endswith(' mph'):
+                                                    mph = int(maxspeed.replace(' mph', ''))
+                                                    closest_speed = int(mph * 1.609)  # Convert to km/h
+                                                elif 'walk' in maxspeed.lower():
+                                                    closest_speed = 5  # Walking speed
+                                                # Add more parsing as needed
+                                            except:
+                                                continue
+                        
+                        # Only use speed limit if road is very close (within ~50m)
+                        if min_distance < 0.0005 and closest_speed:  # ~50m in degrees
+                            speed_limits[i + j] = closest_speed
+                        
+                except Exception as e:
+                    if self.debug:
+                        print(f"     Batch {batch_num} failed: {e}")
+                    continue
+                    
+            successful_fetches = sum(1 for speed in speed_limits if speed is not None)
+            if self.debug:
+                print(f"   Successfully fetched {successful_fetches}/{len(points)} speed limits")
+                if successful_fetches > 0:
+                    valid_speeds = [s for s in speed_limits if s is not None]
+                    print(f"   Speed limit range: {min(valid_speeds)}-{max(valid_speeds)} km/h")
+                
+            return speed_limits
+            
+        except Exception as e:
+            if self.debug:
+                print(f"   Speed limit fetch failed: {e}")
+                print("   Continuing without speed limit data...")
+            return [None] * len(points)
         
     def create_output_gpx(self, points: List[Tuple[float, float, Optional[float]]], 
                          timestamps: List[datetime], original_gpx_file: Path, 
@@ -613,10 +758,13 @@ class GPXTimestampGenerator:
             print("   Using fallback timing calculation...")
             osrm_data = {}
             
-        # Step 4: Calculate timestamps
-        timestamps = self.calculate_timestamps(points, osrm_data, start_time)
+        # Step 4: Fetch speed limits from OpenStreetMap
+        speed_limits = self.fetch_speed_limits(points)
+            
+        # Step 5: Calculate timestamps
+        timestamps = self.calculate_timestamps(points, osrm_data, start_time, speed_limits)
         
-        # Step 5: Create output GPX
+        # Step 6: Create output GPX
         self.create_output_gpx(points, timestamps, input_file, output_file)
         
         print(f"✅ Successfully generated timestamped GPX: {output_file}")
