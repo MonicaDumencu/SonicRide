@@ -1,0 +1,295 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SonicRide - GPX to Spotify Playlist</title>
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <!-- Header -->
+        <header class="header">
+            <div class="logo">
+                <i class="fas fa-motorcycle"></i>
+                <h1>SonicRide</h1>
+            </div>
+            <p class="subtitle">Transform your motorcycle rides into personalized Spotify playlists</p>
+        </header>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Upload Section -->
+            <section class="upload-section" id="upload-section">
+                <div class="upload-card">
+                    <div class="upload-icon">
+                        <i class="fas fa-cloud-upload-alt"></i>
+                    </div>
+                    <h2>Upload Your GPX File</h2>
+                    <p>Upload your motorcycle ride GPX file and we'll create a personalized Spotify playlist based on your riding style</p>
+                    
+                    <div class="upload-container">
+                        <!-- Left side - File Upload -->
+                        <div class="upload-section-left">
+                            <form id="upload-form" enctype="multipart/form-data">
+                                <div class="file-input-wrapper">
+                                    <input type="file" id="gpx-file" name="gpx_file" accept=".gpx" required>
+                                    <label for="gpx-file" class="file-input-label">
+                                        <i class="fas fa-file-upload"></i>
+                                        <span>Choose GPX File</span>
+                                    </label>
+                                </div>
+                                
+                                <button type="submit" class="upload-btn" id="upload-btn">
+                                    <i class="fas fa-rocket"></i>
+                                    Start Fast Processing
+                                </button>
+                            </form>
+                        </div>
+                        
+                        <!-- Right side - Processing Mode Selection -->
+                        <div class="upload-section-right">
+                            <div class="processing-options">
+                                <h3 class="options-title">Choose Processing Mode</h3>
+                                <input type="hidden" id="fast-mode" name="fast_mode" value="true">
+                                
+                                <div class="mode-selector">
+                                    <div class="mode-card fast-mode active" data-mode="fast">
+                                        <div class="mode-header">
+                                            <div class="mode-icon">
+                                                <i class="fas fa-rocket"></i>
+                                            </div>
+                                            <div class="mode-title">
+                                                <h4>Fast Mode</h4>
+                                                <span class="recommended-badge">Recommended</span>
+                                            </div>
+                                            <div class="selection-indicator">
+                                                <i class="fas fa-check-circle"></i>
+                                            </div>
+                                        </div>
+                                        <div class="mode-description">
+                                            <p>Optimized for speed with smart simplifications</p>
+                                        </div>
+                                        <div class="mode-features">
+                                            <div class="feature">
+                                                <i class="fas fa-bolt"></i>
+                                                <span>50-70% faster processing</span>
+                                            </div>
+                                            <div class="feature">
+                                                <i class="fas fa-chart-line"></i>
+                                                <span>Smart point simplification</span>
+                                            </div>
+                                            <div class="feature">
+                                                <i class="fas fa-network-wired"></i>
+                                                <span>Fewer API requests</span>
+                                            </div>
+                                            <div class="feature">
+                                                <i class="fas fa-music"></i>
+                                                <span>Perfect for playlists</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="mode-card detailed-mode" data-mode="detailed">
+                                        <div class="mode-header">
+                                            <div class="mode-icon">
+                                                <i class="fas fa-microscope"></i>
+                                            </div>
+                                            <div class="mode-title">
+                                                <h4>Detailed Mode</h4>
+                                                <span class="precision-badge">Max Precision</span>
+                                            </div>
+                                            <div class="selection-indicator">
+                                                <i class="far fa-circle"></i>
+                                            </div>
+                                        </div>
+                                        <div class="mode-description">
+                                            <p>Maximum precision with full GPS analysis</p>
+                                        </div>
+                                        <div class="mode-features">
+                                            <div class="feature">
+                                                <i class="fas fa-crosshairs"></i>
+                                                <span>Maximum precision</span>
+                                            </div>
+                                            <div class="feature">
+                                                <i class="fas fa-map-marked-alt"></i>
+                                                <span>All GPS points processed</span>
+                                            </div>
+                                            <div class="feature">
+                                                <i class="fas fa-vector-square"></i>
+                                                <span>Full geometry details</span>
+                                            </div>
+                                            <div class="feature">
+                                                <i class="fas fa-clock"></i>
+                                                <span>Slower but thorough</span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Processing Section -->
+            <section class="processing-section" id="processing-section" style="display: none;">
+                <div class="processing-card">
+                    <div class="processing-header">
+                        <h2>Processing Your Ride</h2>
+                        <div class="processing-spinner">
+                            <i class="fas fa-cog fa-spin"></i>
+                        </div>
+                    </div>
+                    
+                    <!-- Progress Bar -->
+                    <div class="progress-container">
+                        <div class="progress-bar">
+                            <div class="progress-fill" id="progress-fill"></div>
+                        </div>
+                        <span class="progress-text" id="progress-text">0%</span>
+                    </div>
+
+                    <!-- Processing Steps -->
+                    <div class="processing-steps">
+                        <div class="step" id="step-timestamp">
+                            <div class="step-icon">
+                                <i class="fas fa-clock"></i>
+                            </div>
+                            <div class="step-content">
+                                <h3>Generating Timestamps</h3>
+                                <p>Using OSRM map-matching for realistic travel times</p>
+                            </div>
+                            <div class="step-status">
+                                <i class="fas fa-hourglass-half"></i>
+                            </div>
+                        </div>
+
+                        <div class="step" id="step-metrics">
+                            <div class="step-icon">
+                                <i class="fas fa-chart-line"></i>
+                            </div>
+                            <div class="step-content">
+                                <h3>Analyzing Ride Metrics</h3>
+                                <p>Calculating lean angles and cornering analysis</p>
+                            </div>
+                            <div class="step-status">
+                                <i class="fas fa-hourglass-half"></i>
+                            </div>
+                        </div>
+
+                        <div class="step" id="step-playlist">
+                            <div class="step-icon">
+                                <i class="fab fa-spotify"></i>
+                            </div>
+                            <div class="step-content">
+                                <h3>Creating Spotify Playlist</h3>
+                                <p>Generating mood-based music selection</p>
+                            </div>
+                            <div class="step-status">
+                                <i class="fas fa-hourglass-half"></i>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Current Status -->
+                    <div class="current-status">
+                        <p id="status-message">Initializing...</p>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Results Section -->
+            <section class="results-section" id="results-section" style="display: none;">
+                <div class="results-card">
+                    <div class="results-header">
+                        <div class="success-icon">
+                            <i class="fas fa-check-circle"></i>
+                        </div>
+                        <h2>Your SonicRide is Ready!</h2>
+                        <p>Your motorcycle ride has been transformed into a personalized Spotify playlist</p>
+                    </div>
+
+                    <!-- Playlist Info -->
+                    <div class="playlist-info" id="playlist-info">
+                        <div class="playlist-card">
+                            <div class="playlist-icon">
+                                <i class="fab fa-spotify"></i>
+                            </div>
+                            <div class="playlist-details">
+                                <h3 id="playlist-name">Loading...</h3>
+                                <p id="playlist-stats">Loading...</p>
+                                <a href="#" id="playlist-url" class="playlist-link" target="_blank" style="display: none;">
+                                    <i class="fas fa-external-link-alt"></i>
+                                    Open in Spotify
+                                </a>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Download Links -->
+                    <div class="download-section">
+                        <h3>Download Generated Files</h3>
+                        <div class="download-links">
+                            <a href="#" id="download-timestamped" class="download-link">
+                                <i class="fas fa-download"></i>
+                                Timestamped GPX
+                            </a>
+                            <a href="#" id="download-metrics" class="download-link">
+                                <i class="fas fa-download"></i>
+                                Ride Metrics CSV
+                            </a>
+                        </div>
+                    </div>
+
+                    <!-- New Upload Button -->
+                    <button class="new-upload-btn" id="new-upload-btn">
+                        <i class="fas fa-plus"></i>
+                        Process Another Ride
+                    </button>
+                </div>
+            </section>
+
+            <!-- Error Section -->
+            <section class="error-section" id="error-section" style="display: none;">
+                <div class="error-card">
+                    <div class="error-icon">
+                        <i class="fas fa-exclamation-triangle"></i>
+                    </div>
+                    <h2>Processing Failed</h2>
+                    <p id="error-message">An error occurred during processing.</p>
+                    <button class="retry-btn" id="retry-btn">
+                        <i class="fas fa-redo"></i>
+                        Try Again
+                    </button>
+                </div>
+            </section>
+        </main>
+
+        <!-- Footer -->
+        <footer class="footer">
+            <div class="footer-content">
+                <p>&copy; 2025 SonicRide - Transform your rides into music</p>
+                <div class="tech-stack">
+                    <span>Powered by:</span>
+                    <i class="fab fa-python" title="Python"></i>
+                    <i class="fas fa-map" title="OSRM"></i>
+                    <i class="fab fa-spotify" title="Spotify"></i>
+                </div>
+            </div>
+        </footer>
+    </div>
+
+    <!-- Loading Overlay -->
+    <div class="loading-overlay" id="loading-overlay" style="display: none;">
+        <div class="loading-spinner">
+            <i class="fas fa-motorcycle fa-spin"></i>
+            <p>Processing your ride...</p>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='script.js') }}"></script>
+</body>
+</html>

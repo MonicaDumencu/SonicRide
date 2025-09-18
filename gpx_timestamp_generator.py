@@ -83,7 +83,7 @@ class GPXTimestampGenerator:
     """GPX timestamp generator using OSRM map-matching."""
     
     def __init__(self, osrm_server: str = "http://router.project-osrm.org", 
-                 profile: str = "car", debug: bool = False):
+                 profile: str = "car", debug: bool = False, progress_callback=None):
         """
         Initialize the GPX timestamp generator.
         
@@ -91,10 +91,12 @@ class GPXTimestampGenerator:
             osrm_server: OSRM server URL (default: public OSRM server)
             profile: OSRM routing profile (car, bike, foot)
             debug: Enable debug output
+            progress_callback: Function to call with progress updates (percentage, message)
         """
         self.osrm_server = osrm_server.rstrip('/')
         self.profile = profile
         self.debug = debug
+        self.progress_callback = progress_callback
         
     def parse_gpx(self, gpx_file: Path) -> List[Tuple[float, float, Optional[float]]]:
         """
@@ -173,7 +175,11 @@ class GPXTimestampGenerator:
             print(f"🗺️  Map-matching {len(points)} points with OSRM...")
             
         # For routes with many points, we need to chunk them to avoid URL length limits
-        max_points_per_request = 100  # Conservative limit to avoid 414 errors
+        # Use larger chunks in fast mode for better performance
+        if hasattr(self, '_fast_mode') and self._fast_mode:
+            max_points_per_request = 200  # Larger chunks in fast mode
+        else:
+            max_points_per_request = 100  # Conservative limit to avoid 414 errors
         
         if len(points) <= max_points_per_request:
             return self._single_osrm_request(points)
@@ -188,12 +194,21 @@ class GPXTimestampGenerator:
         # OSRM match service URL
         url = f"{self.osrm_server}/match/v1/{self.profile}/{coordinates}"
         
-        params = {
-            'overview': 'full',
-            'geometries': 'geojson',
-            'annotations': 'true',
-            'steps': 'false'
-        }
+        # Optimize parameters for fast mode
+        if hasattr(self, '_fast_mode') and self._fast_mode:
+            params = {
+                'overview': 'simplified',  # Less detailed geometry
+                'geometries': 'polyline',  # More compact than geojson
+                'annotations': 'duration',  # Only get duration, skip other annotations
+                'steps': 'false'
+            }
+        else:
+            params = {
+                'overview': 'full',
+                'geometries': 'geojson',
+                'annotations': 'true',
+                'steps': 'false'
+            }
         
         try:
             if self.debug:
@@ -224,8 +239,8 @@ class GPXTimestampGenerator:
     
     def _chunked_osrm_request(self, points: List[Tuple[float, float, Optional[float]]], chunk_size: int) -> dict:
         """Send multiple OSRM requests for large routes and combine results."""
+        num_chunks = (len(points) + chunk_size - 1) // chunk_size
         if self.debug:
-            num_chunks = (len(points) + chunk_size - 1) // chunk_size
             print(f"   Route too large, splitting into {num_chunks} chunks of ~{chunk_size} points each...")
         
         all_durations = []
@@ -239,6 +254,14 @@ class GPXTimestampGenerator:
             
             if len(chunk_points) < 2:  # Need at least 2 points for routing
                 continue
+            
+            chunk_num = i // (chunk_size - 1) + 1
+            
+            # Report progress during chunked processing (15% to 35% of total progress)
+            if self.progress_callback:
+                chunk_progress = (chunk_num / num_chunks) * 20  # 20% of total for OSRM processing
+                total_progress = round(15 + chunk_progress, 2)  # Start at 15%, go to 35%, rounded to 2 decimals
+                self.progress_callback(total_progress, f"Processing route chunk {chunk_num}/{num_chunks}...")
                 
             try:
                 chunk_data = self._single_osrm_request(chunk_points)
@@ -258,7 +281,7 @@ class GPXTimestampGenerator:
                 
             except Exception as e:
                 if self.debug:
-                    print(f"   Chunk {i//chunk_size + 1} failed: {e}")
+                    print(f"   Chunk {chunk_num} failed: {e}")
                 continue
         
         if self.debug:
@@ -743,14 +766,35 @@ class GPXTimestampGenerator:
             print(f"🚀 Processing GPX file: {input_file}")
             print(f"   Start time: {start_time}")
             print(f"   Output file: {output_file}")
-            
-        # Step 1: Parse GPX
+        
+        # Step 1: Parse GPX (5% progress)
+        if self.progress_callback:
+            self.progress_callback(5, "Parsing GPX file...")
         points = self.parse_gpx(input_file)
         
-        # Step 2: Fetch elevation data if missing
+        # Step 1.5: Simplify points in fast mode for better performance (10% progress)
+        if self.progress_callback:
+            self.progress_callback(10, "Optimizing route points...")
+        if hasattr(self, '_fast_mode') and self._fast_mode and len(points) > 300:
+            # Keep every nth point to reduce processing time
+            original_count = len(points)
+            # Keep every 2nd or 3rd point depending on density
+            step = 2 if len(points) < 1000 else 3
+            # Always keep first and last points
+            simplified_points = [points[0]]
+            simplified_points.extend(points[step::step])
+            if points[-1] not in simplified_points:
+                simplified_points.append(points[-1])
+            points = simplified_points
+            if self.debug:
+                print(f"🚀 Fast mode: Simplified {original_count} points to {len(points)} points")
+        
+        # Step 2: Fetch elevation data if missing (skipped but report progress)
+        if self.progress_callback:
+            self.progress_callback(15, "Starting map-matching with OSRM...")
         points = self.fetch_elevations(points)
         
-        # Step 3: Map-match with OSRM
+        # Step 3: Map-match with OSRM (15-35% progress, handled in _chunked_osrm_request)
         try:
             osrm_data = self.map_match_osrm(points)
         except Exception as e:
@@ -758,14 +802,24 @@ class GPXTimestampGenerator:
             print("   Using fallback timing calculation...")
             osrm_data = {}
             
-        # Step 4: Fetch speed limits from OpenStreetMap
+        # Step 4: Fetch speed limits from OpenStreetMap (40% progress)
+        if self.progress_callback:
+            self.progress_callback(40, "Fetching speed limit data...")
         speed_limits = self.fetch_speed_limits(points)
             
-        # Step 5: Calculate timestamps
+        # Step 5: Calculate timestamps (50% progress)
+        if self.progress_callback:
+            self.progress_callback(50, "Calculating realistic timestamps...")
         timestamps = self.calculate_timestamps(points, osrm_data, start_time, speed_limits)
         
-        # Step 6: Create output GPX
+        # Step 6: Create output GPX (90% progress)
+        if self.progress_callback:
+            self.progress_callback(90, "Creating timestamped GPX file...")
         self.create_output_gpx(points, timestamps, input_file, output_file)
+        
+        # Complete (100% progress)
+        if self.progress_callback:
+            self.progress_callback(100, "Timestamp generation complete!")
         
         print(f"✅ Successfully generated timestamped GPX: {output_file}")
         print(f"   Processed {len(points)} points from {timestamps[0]} to {timestamps[-1]}")
@@ -825,6 +879,8 @@ For best results with motorcycle rides, use 'car' profile (default).
                        help="Enable debug output")
     parser.add_argument("--skip-elevation", action="store_true",
                        help="Skip fetching elevation data (faster processing)")
+    parser.add_argument("--fast", action="store_true",
+                       help="Fast mode: larger chunks, simplified processing for better performance")
     
     args = parser.parse_args()
     
@@ -862,6 +918,11 @@ For best results with motorcycle rides, use 'car' profile (default).
     # Skip elevation fetching if requested
     if args.skip_elevation:
         generator.fetch_elevations = lambda points: points
+    
+    # Enable fast mode optimizations
+    if args.fast:
+        # Increase chunk size for better performance (trade precision for speed)
+        generator._fast_mode = True
     
     # Process GPX file
     try:
