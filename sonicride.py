@@ -1,28 +1,184 @@
 #!/usr/bin/env python3
 """
 SonicRide: Smart Spotify Playlist Generator
-Creates personalized playlists based on motorcycle ride metrics using intelligent search.
-"""
-import os
-import argparse
-import sys
-from pathlib import Path
-import pandas as pd
-import spotipy
-from spotipy.oauth2 import SpotifyOAuth, SpotifyClientCredentials
-import random
-import time
-import math
-import io
-import base64
 
-from PIL import Image, ImageDraw, ImageFont
+Creates personalized playlists based on motorcycle ride metrics using
+intelligent search.
+"""
+import argparse
+import base64
+import math
+import os
+import random
+import sys
+import time
+from pathlib import Path
+
+import pandas as pd
+import requests
+import spotipy
+from spotipy.oauth2 import SpotifyClientCredentials, SpotifyOAuth
 
 try:
     from dotenv import load_dotenv
+
     load_dotenv()
 except ImportError:
     pass
+
+
+def generate_cover_image_bytes(
+    mood: str | None = None,
+    prefix: str | None = None,
+    size: int = 296,
+    genres: list | None = None,
+    tracks: list | None = None,
+    show_text: bool = False,
+    mode: str = "hf",
+) -> str | None:
+    """Generate a cover image and return a base64-encoded image string.
+
+    Uses the Hugging Face Inference API. It reads `HF_API_TOKEN` and optional
+    `HF_MODEL` from environment variables. Defaults to
+    `stabilityai/stable-diffusion-xl-base-1.0`.
+
+    Returns base64 image data (no data URL prefix) or ``None`` on failure.
+    """
+    # Only HF mode is supported in this simplified function
+    if mode != "hf":
+        return None
+
+    hf_token = os.environ.get("HF_API_TOKEN")
+    if not hf_token:
+        if os.environ.get("DEBUG"):
+            print("[DEBUG] HF_API_TOKEN not set")
+        return None
+
+    model = os.environ.get("HF_MODEL", "stabilityai/stable-diffusion-xl-base-1.0")
+
+    # Build a basic prompt from the playlist inputs
+    prompt_parts = []
+    if mood:
+        prompt_parts.append(mood)
+    if genres:
+        prompt_parts.append(", ".join(genres[:3]))
+    if prefix:
+        prompt_parts.append(prefix)
+
+    # Compose a detailed prompt that encourages realistic, photorealistic
+    # album covers while asking the model to optimize for small web-sized
+    # JPEG output (helps keep Spotify upload under the size limit).
+    prompt = (
+        " | ".join([p for p in prompt_parts if p])
+        or "realistic album cover, cinematic photography"
+    )
+    prompt += (
+        ", photorealistic, studio lighting, high detail, no text, "
+        "natural colors, cinematic composition, film grain, "
+        "shot on 35mm, shallow depth of field. "
+        "Optimize for web: small file size, high JPEG compression, 8-bit RGB."
+    )
+
+    # Prefer binary JPEG response from HF if the model supports it
+    # and hint at web-optimized/formats in parameters. Keep timeout moderate.
+    headers = {"Authorization": f"Bearer {hf_token}", "Accept": "image/jpeg"}
+
+    # Inference API for image generation accepts content-type and prompt payload
+    url = f"https://api-inference.huggingface.co/models/{model}"
+
+    # Ensure dimensions are multiples of 8 (many SD endpoints require this)
+    size_aligned = max(8, (size // 8) * 8)
+
+    # Parameters: ask for small dimensions, jpeg format, and safety/compression.
+    # Include a soft hint for maximum bytes; not all models honor it.
+    payload = {
+        "inputs": prompt,
+        "options": {"wait_for_model": True},
+        "parameters": {
+            "width": size_aligned,
+            "height": size_aligned,
+            "format": "jpeg",
+            "jpeg_quality": 65,
+            "optimize": True,
+            "max_bytes": 200000,
+            "return_full_text": False,
+        },
+    }
+
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=60)
+        if resp.status_code != 200:
+            if os.environ.get("DEBUG"):
+                print(f"[DEBUG] HF API error {resp.status_code}: {resp.text}")
+            return None
+
+        # Response content should be image bytes (if model returns binary) or JSON with base64
+        content_type = resp.headers.get("content-type", "")
+        if "application/json" in content_type:
+            data = resp.json()
+            # Some HF responses return a raw base64 string
+            if isinstance(data, str):
+                return data
+            # Some HF responses embed base64 under 'image' or are an array
+            if isinstance(data, dict) and "image" in data:
+                return data["image"]
+            # Some responses are a list of objects containing generated image
+            if isinstance(data, list) and data:
+                # list of strings
+                if all(isinstance(x, str) for x in data):
+                    return data[0]
+                # list of dicts
+                if isinstance(data[0], dict):
+                    if "generated_image" in data[0]:
+                        return data[0]["generated_image"]
+                    if "image" in data[0]:
+                        return data[0]["image"]
+            # Fallback: no base64 found
+            if os.environ.get("DEBUG"):
+                try:
+                    print(
+                        "[DEBUG] HF JSON response did not contain an image field"
+                    )
+                except Exception:
+                    print(
+                        "[DEBUG] HF JSON response did not contain an image field"
+                    )
+            return None
+
+    # If the server honored `Accept: image/jpeg`, return the binary as
+    # base64.
+        content_type = resp.headers.get("content-type", "")
+        if content_type.startswith("image"):
+            img_bytes = resp.content
+            b64 = base64.b64encode(img_bytes).decode("utf-8")
+            return b64
+
+    # Otherwise fall back to JSON handling above (handled earlier) — try to
+    # parse JSON
+        if "application/json" in content_type:
+            data = resp.json()
+            if isinstance(data, str):
+                return data
+            if isinstance(data, dict) and "image" in data:
+                return data["image"]
+            if isinstance(data, list) and data:
+                if all(isinstance(x, str) for x in data):
+                    return data[0]
+                if isinstance(data[0], dict):
+                    if "generated_image" in data[0]:
+                        return data[0]["generated_image"]
+                    if "image" in data[0]:
+                        return data[0]["image"]
+
+        # As a last resort, return raw base64 of response content
+        img_bytes = resp.content
+        b64 = base64.b64encode(img_bytes).decode("utf-8")
+        return b64
+
+    except Exception as e:
+        if os.environ.get("DEBUG"):
+            print(f"[DEBUG] Error generating cover via HF: {e}")
+        return None
 
 
 def determine_mood(avg_speed: float, avg_lean: float) -> str:
@@ -40,8 +196,8 @@ def determine_mood(avg_speed: float, avg_lean: float) -> str:
     These are intentionally coarse and meant to drive different
     music parameter presets in `get_mood_parameters`.
     """
-    s = (avg_speed or 0)
-    lean = (avg_lean or 0)
+    s = avg_speed or 0
+    lean = avg_lean or 0
 
     # Adrenaline: very high speed or very large lean angle
     if s >= 110 or lean >= 35:
@@ -77,22 +233,16 @@ def get_mood_parameters(mood: str) -> tuple:
     mood_config = {
         # Very intense riding: fast BPM, high energy, aggressive genres
         "adrenaline": (["hard-rock", "metal", "punk"], 0.95, 150),
-
         # Sporty / thrilling: driving EDM and rock with high energy
         "energetic": (["electronic", "dance", "alt-rock"], 0.85, 135),
-
         # Lively but melodic: modern pop/indie with upbeat tempo
         "upbeat": (["pop", "indie-pop", "dance-pop"], 0.72, 122),
-
         # Confident cruising: rhythmic indie/folk with moderate tempo
         "steady": (["indie", "folk", "folk-pop"], 0.58, 100),
-
         # Gentle, intimate: acoustic and jazzy selections at mellow tempo
         "relaxed": (["acoustic", "singer-songwriter", "jazz"], 0.45, 82),
-
         # Very calm: ambient, minimal classical textures — low energy & tempo
         "serene": (["ambient", "neo-classical", "minimal"], 0.22, 60),
-
         # legacy labels for compatibility
         "high_energy": (["rock", "electronic"], 0.85, 130),
         "moderate": (["pop", "indie"], 0.6, 110),
@@ -101,64 +251,104 @@ def get_mood_parameters(mood: str) -> tuple:
     return mood_config.get(mood, mood_config["chill"])
 
 
-def score_track_match(audio_features: dict, target_energy: float, target_tempo: int, target_valence: float = None) -> float:
+def score_track_match(
+    audio_features: dict,
+    target_energy: float,
+    target_tempo: int,
+    target_valence: float = None,
+) -> float:
     """Score how well a track matches target audio features (0-100)."""
     if not audio_features:
         return 0
-    
+
     score = 0
-    
+
     # Energy matching (40% weight) - Most important for ride matching
-    energy_diff = abs(audio_features.get('energy', 0.5) - target_energy)
+    energy_diff = abs(audio_features.get("energy", 0.5) - target_energy)
     score += (1 - energy_diff) * 40
-    
+
     # Tempo matching (30% weight) - BPM matching for ride rhythm
-    tempo_diff = abs(audio_features.get('tempo', 120) - target_tempo) / 50
+    tempo_diff = abs(audio_features.get("tempo", 120) - target_tempo) / 50
     score += max(0, (1 - tempo_diff)) * 30
-    
+
     # Valence/mood matching (20% weight) - Happiness/energy level
     if target_valence:
-        valence_diff = abs(audio_features.get('valence', 0.5) - target_valence)
+        valence_diff = abs(audio_features.get("valence", 0.5) - target_valence)
         score += (1 - valence_diff) * 20
     else:
         score += 20  # Neutral bonus
-    
+
     # Danceability bonus for high energy rides (10% weight)
     if target_energy > 0.7:
-        score += audio_features.get('danceability', 0.5) * 10
-    
+        score += audio_features.get("danceability", 0.5) * 10
+
     return min(100, max(0, score))
 
 
-def build_search_queries(genres: list, mood: str) -> list:
+def build_search_queries(
+    genres: list, mood: str, user_prefs: list | None = None
+) -> list:
     """Build intelligent search queries based on genres and mood."""
     queries = []
-    
+
     # Genre-based searches
     for genre in genres:
-        queries.extend([
-            genre,
-            f"{genre} music",
-            f"best {genre} songs"
-        ])
-    
+        queries.extend([genre, f"{genre} music", f"best {genre} songs"])
+
     # Mood-specific searches with riding context
     mood_queries = {
         "high_energy": [
-            "high energy rock", "electronic dance", "workout music",
-            "energetic", "powerful", "intense music", "driving rock"
+            "high energy rock",
+            "electronic dance",
+            "workout music",
+            "energetic",
+            "powerful",
+            "intense music",
+            "driving rock",
         ],
         "moderate": [
-            "upbeat pop", "indie hits", "feel good music",
-            "moderate tempo", "driving music", "road trip songs"
+            "upbeat pop",
+            "indie hits",
+            "feel good music",
+            "moderate tempo",
+            "driving music",
+            "road trip songs",
         ],
         "chill": [
-            "chill jazz", "acoustic chill", "relaxing music",
-            "mellow", "calm", "peaceful", "cruising music"
-        ]
+            "chill jazz",
+            "acoustic chill",
+            "relaxing music",
+            "mellow",
+            "calm",
+            "peaceful",
+            "cruising music",
+        ],
     }
-    
+
     queries.extend(mood_queries.get(mood, mood_queries["chill"]))
+    # Incorporate user preferences as higher-priority queries
+    if user_prefs:
+        # place prefs at front to bias results toward user's tastes
+        pref_queries = []
+        for p in user_prefs:
+            p = p.strip()
+            if not p:
+                continue
+            pref_queries.extend(
+                [
+                    p,
+                    f"{p} music",
+                    f"best {p} songs",
+                ]
+            )
+        # de-duplicate while preserving order: prefs first
+        seen = set()
+        combined = []
+        for q in pref_queries + queries:
+            if q not in seen:
+                seen.add(q)
+                combined.append(q)
+        queries = combined
     return queries
 
 
@@ -167,16 +357,25 @@ def get_target_valence(mood: str) -> float:
     return {"high_energy": 0.7, "moderate": 0.6, "chill": 0.4}.get(mood, 0.5)
 
 
-def search_and_score_tracks(sp, genres: list, mood: str, limit: int, target_energy: float, target_tempo: int, debug: bool = False) -> list:
+def search_and_score_tracks(
+    sp,
+    genres: list,
+    mood: str,
+    limit: int,
+    target_energy: float,
+    target_tempo: int,
+    debug: bool = False,
+    user_prefs: list | None = None,
+) -> list:
     """Search for tracks and score them based on audio features."""
-    
-    search_queries = build_search_queries(genres, mood)
-    target_valence = get_target_valence(mood)
-    
+
+    search_queries = build_search_queries(genres, mood, user_prefs)
+    # target_valence intentionally unused when audio-features are disabled
+
     # Collect candidate tracks
     candidate_tracks = []
     track_ids_seen = set()
-    
+
     if debug:
         print(f"🔍 Searching with {len(search_queries)} queries...")
 
@@ -187,11 +386,15 @@ def search_and_score_tracks(sp, genres: list, mood: str, limit: int, target_ener
     compressed_queries = search_queries[:max_queries]
     per_query_limit = 50
     if debug:
-        print(f"[DEBUG] Using {len(compressed_queries)} queries, up to {per_query_limit} results each")
-    
+        print(
+            "[DEBUG] Using %d queries, up to %d results each"
+            % (len(compressed_queries), per_query_limit)
+        )
+
     # Search phase
     for query in compressed_queries:
-        if len(candidate_tracks) >= limit * 3:  # Get 3x candidates for better selection
+        if len(candidate_tracks) >= limit * 3:
+            # Get 3x candidates for better selection
             break
 
         # Perform search with retries and exponential backoff to handle 429/502 rate errors
@@ -200,19 +403,21 @@ def search_and_score_tracks(sp, genres: list, mood: str, limit: int, target_ener
         while search_attempts < max_search_attempts:
             try:
                 # Request more results per query to reduce total requests.
-                per_call = max(10, min(per_query_limit, limit * 3 - len(candidate_tracks)))
+                per_call = max(
+                    10, min(per_query_limit, limit * 3 - len(candidate_tracks))
+                )
                 if per_call <= 0:
                     break
-                results = sp.search(q=query, type='track', limit=per_call)
-                tracks_found = len(results.get('tracks', {}).get('items', []))
+                results = sp.search(q=query, type="track", limit=per_call)
+                tracks_found = len(results.get("tracks", {}).get("items", []))
 
                 if debug and tracks_found > 0:
                     print(f"   '{query}': found {tracks_found} tracks")
 
-                for track in results['tracks']['items']:
-                    if track['id'] not in track_ids_seen:
+                for track in results["tracks"]["items"]:
+                    if track["id"] not in track_ids_seen:
                         candidate_tracks.append(track)
-                        track_ids_seen.add(track['id'])
+                        track_ids_seen.add(track["id"])
                         if len(candidate_tracks) >= limit * 3:
                             break
 
@@ -223,240 +428,383 @@ def search_and_score_tracks(sp, genres: list, mood: str, limit: int, target_ener
                 search_attempts += 1
                 msg = str(e)
                 # Detect rate-limit-like failures (429 or repeated server errors)
-                is_rate = '429' in msg or 'rate' in msg.lower() or 'Retry' in msg
+                # (we don't explicitly use the boolean below but keep the check
+                # available for debugging/extension)
+                _ = "429" in msg or "rate" in msg.lower() or "Retry" in msg
                 backoff = 1.0 * (2 ** (search_attempts - 1))
                 if debug:
-                    print(f"[DEBUG] Search attempt {search_attempts} for '{query}' failed: {e}")
-                    print(f"[DEBUG] Backing off {backoff}s before retrying")
+                    print(
+                        "[DEBUG] Search attempt %d for '%s' failed: %s"
+                        % (search_attempts, query, e)
+                    )
+                    print("[DEBUG] Backing off %ss before retrying" % (backoff,))
                 time.sleep(backoff)
                 if search_attempts >= max_search_attempts:
                     if debug:
-                        print(f"[DEBUG] Giving up search for '{query}' after {search_attempts} attempts")
+                        print(
+                            "[DEBUG] Giving up search for '%s' after %d attempts"
+                            % (query, search_attempts)
+                        )
                     break
                 continue
-    
+
     if not candidate_tracks:
         return []
-    
+
     if debug:
         print(f"📊 Found {len(candidate_tracks)} candidate tracks")
-    
+
     # NOTE: audio-features disabled — use search-only results and preserve
     # debug info. This avoids 403s or permission issues when fetching
     # audio features and still returns candidate tracks for playlist creation.
     if debug:
         print("[DEBUG] Audio-features disabled; returning top search results")
-    return candidate_tracks[:min(limit, len(candidate_tracks))]
 
-
-def create_playlist(oauth_sp, tracks: list, mood: str, target_energy: float, target_tempo: int, playlist_prefix: str, public: bool = False, debug: bool = False) -> str:
-    """Create Spotify playlist with selected tracks."""
-    user_id = oauth_sp.me()['id']
-    playlist_name = f"{playlist_prefix} ({mood.capitalize()})"
-    
-    description = f"Auto-generated by SonicRide | Mood: {mood} | Target: {target_energy:.1f} energy, {target_tempo} BPM"
-    
-    playlist = oauth_sp.user_playlist_create(
-        user=user_id,
-        name=playlist_name,
-        public=public,
-        description=description
-    )
-    
-    track_uris = [t['uri'] for t in tracks]
-    oauth_sp.playlist_add_items(playlist_id=playlist['id'], items=track_uris)
-    # Try to generate and upload a cover image (optional)
+    # Build a simple weight for each candidate: preference matches receive
+    # higher weight so they're more likely to be sampled, but sampling is
+    # still random. This preserves variety while respecting user tastes.
     try:
-        img_b64 = generate_cover_image_bytes(mood, playlist_prefix)
-        if img_b64:
-            # Decode to bytes to measure exact size for debug
-            try:
-                img_bytes = base64.b64decode(img_b64)
-            except Exception:
-                img_bytes = None
+        prefs_lower = [p.lower() for p in user_prefs] if user_prefs else []
+        weights = []
+        for t in candidate_tracks:
+            name = (t.get("name") or "").lower()
+            artists = ", ".join(a.get("name", "") for a in t.get("artists", [])).lower()
+            w = 1.0
+            # Increase weight if any preference appears in title or artist
+            for p in prefs_lower:
+                if p and (p in name or p in artists):
+                    w += 3.0
+            weights.append(w)
 
+        # Normalize weights to probabilities
+        total = sum(weights) if weights else 0.0
+        if total <= 0:
+            probs = None
+        else:
+            probs = [w / total for w in weights]
+
+        # Sample without replacement up to `limit*3` candidates using weights
+        max_candidates = min(len(candidate_tracks), max(10, limit * 3))
+        chosen = []
+        indices = list(range(len(candidate_tracks)))
+        random.seed(None)
+        if probs is None:
+            random.shuffle(indices)
+            chosen_idx = indices[:max_candidates]
+        else:
+            # Weighted sampling without replacement via cumulative method
+            cum = list(probs)
+            for _ in range(max_candidates):
+                r = random.random()
+                s = 0.0
+                for i, idx in enumerate(indices):
+                    s += cum[i]
+                    if r <= s:
+                        chosen.append(candidate_tracks[idx])
+                        # remove chosen index and its weight
+                        indices.pop(i)
+                        cum.pop(i)
+                        # re-normalize cumulative weights
+                        total_remain = sum(cum) if cum else 0.0
+                        if total_remain > 0:
+                            cum = [c / total_remain for c in cum]
+                        break
+                if not indices:
+                    break
+            chosen_idx = None
+
+        if chosen:
+            final_candidates = chosen
+        else:
+            final_candidates = [candidate_tracks[i] for i in chosen_idx]
+
+        return final_candidates[: min(limit, len(final_candidates))]
+    except Exception:
+        # On any failure, fall back to simple shuffle-based randomness
+        try:
+            random.seed(None)
+            random.shuffle(candidate_tracks)
+        except Exception:
+            pass
+        return candidate_tracks[: min(limit, len(candidate_tracks))]
+
+
+def create_playlist(
+    oauth_sp,
+    tracks: list,
+    mood: str,
+    target_energy: float,
+    target_tempo: int,
+    playlist_prefix: str,
+    genres: list = None,
+    public: bool = False,
+    debug: bool = False,
+) -> str:
+    """Create Spotify playlist with selected tracks and realistic cover art."""
+    user_id = oauth_sp.me()["id"]
+    playlist_name = f"{playlist_prefix} ({mood.capitalize()})"
+
+    description = (
+        f"Auto-generated by SonicRide | Mood: {mood} | "
+        f"Target: {target_energy:.1f} energy, {target_tempo} BPM"
+    )
+
+    playlist = oauth_sp.user_playlist_create(
+        user=user_id, name=playlist_name, public=public, description=description
+    )
+
+    track_uris = [t["uri"] for t in tracks]
+    oauth_sp.playlist_add_items(playlist_id=playlist["id"], items=track_uris)
+
+    # Generate and upload realistic cover art
+    try:
+        if debug:
+            print("[DEBUG] Generating realistic album cover...")
+        # Generate cover using the module-level HF generator
+        cover_image_bytes = generate_cover_image_bytes(
+            mood=mood,
+            prefix=playlist_prefix,
+            size=640,
+            genres=genres or [],
+            tracks=tracks,
+            show_text=False,
+            mode="hf",
+        )
+
+        if cover_image_bytes:
+            oauth_sp.playlist_upload_cover_image(
+                playlist_id=playlist["id"], image_b64=cover_image_bytes
+            )
             if debug:
-                if img_bytes is None:
-                    print("[DEBUG] Generated image invalid base64; skipping upload")
-                else:
-                    print(f"[DEBUG] Generated image bytes: {len(img_bytes)}")
+                print("[DEBUG] Cover art uploaded successfully")
+        else:
+            if debug:
+                print("[DEBUG] Cover generation failed, " "proceeding without image")
 
-            # Spotify expects base64-encoded JPEG bytes without data URI prefix
-            try:
-                oauth_sp.playlist_upload_cover_image(playlist_id=playlist['id'], image_b64=img_b64)
-                if debug:
-                    print("[DEBUG] Cover image uploaded successfully")
-            except Exception as e:
-                if debug:
-                    print(f"[DEBUG] Cover upload failed: {e}")
-                # Non-fatal: upload can fail due to permissions or size; continue
-                pass
     except Exception as e:
         if debug:
-            print(f"[DEBUG] Cover generation failed: {e}")
-        # Non-fatal: if generating the image fails, we still return the playlist URL
+            print(f"[DEBUG] Cover upload failed: {e}")
+        # Continue without cover - not a critical failure
         pass
 
-    return playlist['external_urls']['spotify']
+    return playlist["external_urls"]["spotify"]
 
 
-def generate_cover_image_bytes(mood: str, prefix: str, size: int = 640) -> str:
-    """Generate a simple playlist cover image and return base64 JPEG bytes.
+def analyze_playlist_themes(tracks: list, genres: list, mood: str) -> dict:
+    """Analyze playlist tracks to determine visual themes for cover generation.
 
-    The image is a solid color chosen by mood with overlaid text for prefix
-    and mood. Returns a base64-encoded string suitable for
-    `playlist_upload_cover_image`.
+    Returns a dictionary with visual theme information based on:
+    - Track titles and artist names for keyword analysis
+    - Genre information for overall aesthetic
+    - Mood for color palette and composition style
     """
-    # Mood color palette (pleasant, contrasted)
-    colors = {
-        'adrenaline': (30, 30, 30),
-        'energetic': (220, 50, 47),
-        'upbeat': (255, 165, 0),
-        'steady': (34, 139, 34),
-        'relaxed': (70, 130, 180),
-        'serene': (100, 149, 237),
+    if not tracks:
+        return {
+            "primary_theme": "road",
+            "color_scheme": "neutral",
+            "elements": ["motorcycle"],
+        }
+
+    # Keywords that suggest different visual themes
+    theme_keywords = {
+        "road": [
+            "highway",
+            "road",
+            "drive",
+            "cruise",
+            "journey",
+            "travel",
+            "mile",
+            "route",
+        ],
+        "urban": [
+            "city",
+            "street",
+            "neon",
+            "lights",
+            "downtown",
+            "metro",
+            "urban",
+            "night",
+        ],
+        "nature": [
+            "mountain",
+            "forest",
+            "river",
+            "sky",
+            "wind",
+            "rain",
+            "sun",
+            "valley",
+            "hill",
+        ],
+        "dark": [
+            "dark",
+            "black",
+            "shadow",
+            "midnight",
+            "storm",
+            "thunder",
+            "steel",
+            "iron",
+        ],
+        "energy": [
+            "fire",
+            "electric",
+            "power",
+            "energy",
+            "lightning",
+            "burn",
+            "rush",
+            "speed",
+        ],
+        "vintage": [
+            "classic",
+            "old",
+            "vintage",
+            "retro",
+            "golden",
+            "rusty",
+            "worn",
+            "aged",
+        ],
     }
-    bg = colors.get(mood, (50, 50, 50))
 
-    img = Image.new('RGB', (size, size), color=bg)
-    draw = ImageDraw.Draw(img)
+    # Color schemes based on genre and mood
+    color_schemes = {
+        "rock": "dark_red",
+        "metal": "black_steel",
+        "electronic": "electric_blue",
+        "pop": "vibrant",
+        "indie": "warm_vintage",
+        "folk": "earth_tones",
+        "jazz": "sepia_gold",
+        "acoustic": "natural_wood",
+        "ambient": "cool_blue",
+    }
 
-    # Load a default font; fallback to basic if not available
-    try:
-        font_title = ImageFont.truetype('arial.ttf', size // 12)
-        font_mood = ImageFont.truetype('arial.ttf', size // 10)
-    except Exception:
-        font_title = ImageFont.load_default()
-        font_mood = ImageFont.load_default()
+    # Analyze track and artist names for theme keywords
+    all_text = ""
+    for track in tracks:
+        all_text += (track.get("name", "") + " ").lower()
+        for artist in track.get("artists", []):
+            all_text += (artist.get("name", "") + " ").lower()
 
-    # Draw prefix (top) and mood (center)
-    padding = size // 20
-    title_text = prefix
-    mood_text = mood.capitalize()
+    # Count theme keyword occurrences
+    theme_scores = {}
+    for theme, keywords in theme_keywords.items():
+        score = sum(all_text.count(keyword) for keyword in keywords)
+        theme_scores[theme] = score
 
-    # Title at top-left
-    draw.text((padding, padding), title_text, fill=(255, 255, 255), font=font_title)
+    # Determine primary theme
+    if any(theme_scores.values()):
+        primary_theme = max(theme_scores, key=theme_scores.get)
+    else:
+        primary_theme = "road"
 
-    # Mood centered — use textbbox for compatibility across Pillow versions
-    try:
-        bbox = draw.textbbox((0, 0), mood_text, font=font_mood)
-        w = bbox[2] - bbox[0]
-        h = bbox[3] - bbox[1]
-    except Exception:
-        # Fallback: estimate using font.getsize if available
-        try:
-            w, h = font_mood.getsize(mood_text)
-        except Exception:
-            w, h = (len(mood_text) * (size // 20), size // 10)
+    # Determine color scheme from genres
+    primary_genre = genres[0] if genres else "rock"
+    color_scheme = color_schemes.get(primary_genre, "neutral")
 
-    draw.text(((size - w) / 2, (size - h) / 2), mood_text, fill=(255, 255, 255), font=font_mood)
+    # Mood-based adjustments
+    if mood in ["adrenaline", "energetic"]:
+        if primary_theme == "road":
+            primary_theme = "energy"
+        color_scheme = color_scheme.replace("cool_", "warm_").replace(
+            "sepia_", "bright_"
+        )
+    elif mood in ["serene", "relaxed"]:
+        if color_scheme.startswith("dark_"):
+            color_scheme = "cool_blue"
 
-    # Encode to JPEG and base64, ensuring size <= 256 KB (Spotify limit)
-    max_bytes = 256 * 1024
-    quality = 85
-    buf = io.BytesIO()
-    img.save(buf, format='JPEG', quality=quality)
-    img_bytes = buf.getvalue()
+    # Define visual elements based on theme
+    elements = ["motorcycle"]  # Always include motorcycle for SonicRide
+    if primary_theme == "road":
+        elements.extend(["highway", "horizon", "asphalt"])
+    elif primary_theme == "urban":
+        elements.extend(["cityscape", "streetlights", "reflections"])
+    elif primary_theme == "nature":
+        elements.extend(["landscape", "sky", "mountains"])
+    elif primary_theme == "dark":
+        elements.extend(["shadows", "steel", "concrete"])
+    elif primary_theme == "energy":
+        elements.extend(["motion_blur", "sparks", "trails"])
+    elif primary_theme == "vintage":
+        elements.extend(["weathered", "classic_bike", "sepia"])
 
-    # If image is too large, iteratively reduce quality and/or size
-    while len(img_bytes) > max_bytes and quality > 20:
-        quality -= 5
-        buf = io.BytesIO()
-        img.save(buf, format='JPEG', quality=quality)
-        img_bytes = buf.getvalue()
+    return {
+        "primary_theme": primary_theme,
+        "color_scheme": color_scheme,
+        "elements": elements,
+        "mood": mood,
+        "genre": primary_genre,
+    }
 
-    # If still too large, downscale the image progressively
-    current_size = size
-    while len(img_bytes) > max_bytes and current_size > 128:
-        current_size = int(current_size * 0.8)
-        img_small = img.resize((current_size, current_size), Image.LANCZOS)
-        buf = io.BytesIO()
-        img_small.save(buf, format='JPEG', quality=max(30, quality))
-        img_bytes = buf.getvalue()
 
-    if len(img_bytes) > max_bytes:
-        # As a last resort, return None so upload is skipped
-        return None
-
-    img_b64 = base64.b64encode(img_bytes).decode('ascii')
-    return img_b64
+# Legacy PIL-based image generators removed. Use `generate_cover_image_bytes` (HF) above.
 
 
 def generate_playlist_prefix(df: pd.DataFrame, mood: str) -> str:
-    """Generate a friendly playlist prefix based on ride metrics.
+    """Return a single creative word as playlist name influenced by mood.
 
-    Uses the date (if present), mood, average speed and an approximate
-    duration to create a memorable prefix like "Morning Ride — Steady 50kmh".
+    The goal is to produce a memorable, one-word title (no extra punctuation)
+    that reflects the ride mood, average speed and duration. We sample from
+    curated word lists and optionally combine short modifiers for variety.
     """
-    # Try to extract a date/time from the `time` column and produce a
-    # friendly label (e.g. 'Mon 2025-09-16' and time-of-day 'Morning').
-    date_label = None
-    time_of_day = None
-    if 'time' in df.columns:
-        try:
-            times = pd.to_datetime(df['time'], errors='coerce')
-            if times.notnull().any():
-                dt = times.min()
-                date_label = dt.strftime('%b %d')
-                hour = dt.hour
-                if 5 <= hour < 12:
-                    time_of_day = 'Morning'
-                elif 12 <= hour < 17:
-                    time_of_day = 'Afternoon'
-                elif 17 <= hour < 22:
-                    time_of_day = 'Evening'
-                else:
-                    time_of_day = 'Night'
-        except Exception:
-            date_label = None
-            time_of_day = None
-
-    # Average speed
+    # Lightweight, defensive extraction of metrics
     try:
-        avg_speed = df.get('speed_kmh')
-        avg_speed_val = float(avg_speed.dropna().mean()) if avg_speed is not None and not avg_speed.dropna().empty else None
+        avg_speed = (
+            float(df.get("speed_kmh").dropna().mean())
+            if "speed_kmh" in df.columns
+            else 0.0
+        )
     except Exception:
-        avg_speed_val = None
+        avg_speed = 0.0
+    try:
+        duration_minutes = (
+            int(df.get("dt_s").dropna().sum() / 60)
+            if "dt_s" in df.columns and df["dt_s"].dropna().sum() > 0
+            else None
+        )
+    except Exception:
+        duration_minutes = None
 
-    # Duration in minutes
-    duration_minutes = None
-    if 'dt_s' in df.columns and df['dt_s'].dropna().sum() > 0:
-        duration_minutes = int(df['dt_s'].dropna().sum() / 60)
-    else:
-        try:
-            times = pd.to_datetime(df['time'], errors='coerce')
-            if times.notnull().any():
-                duration_minutes = int((times.max() - times.min()).total_seconds() / 60)
-        except Exception:
-            duration_minutes = None
+    # Word banks tuned to mood and ride energy
+    word_banks = {
+        "adrenaline": ["Sprint", "Razor", "Blaze", "Rogue", "Nitro"],
+        "energetic": ["Surge", "Pulse", "Throttle", "Charge", "Vigor"],
+        "upbeat": ["Groove", "Bounce", "Spark", "Glide", "Radiant"],
+        "steady": ["Cruise", "Drift", "Steady", "Horizon", "Compass"],
+        "relaxed": ["Driftwood", "Mellow", "Ease", "Sway", "Lull"],
+        "serene": ["Calm", "Still", "Haven", "Quiet", "Aether"],
+    }
 
-    # Build friendly pieces
-    pieces = []
-    if time_of_day:
-        pieces.append(time_of_day)
-    if date_label:
-        pieces.append(date_label)
+    # Fallback pool
+    fallback = ["Vibe", "Pulse", "Journey", "Echo", "Orbit", "Halo"]
 
-    main = f"{mood.capitalize()}"
-    extras = []
-    if avg_speed_val:
-        extras.append(f"{int(round(avg_speed_val))} km/h")
-    if duration_minutes and duration_minutes > 0:
-        extras.append(f"{duration_minutes} min")
+    candidates = word_banks.get(mood, fallback)[:]
 
-    # Compose: "Morning Sep 16 — Steady · 50 km/h · 30 min"
-    left = " ".join(pieces) if pieces else None
-    right = " · ".join(extras) if extras else None
+    # Influence selection by speed/duration: faster -> prefer shorter punchy words
+    if avg_speed and avg_speed >= 80:
+        candidates = [w for w in candidates if len(w) <= 6] or candidates
+    # longer rides -> pick more evocative names
+    if duration_minutes and duration_minutes >= 90:
+        candidates = candidates + ["Odyssey", "Marathon"]
 
-    if left:
-        prefix = f"{left} — {main}"
-    else:
-        prefix = main
+    # Randomized per-run selection using OS entropy so names vary per run
+    try:
+        import secrets
 
-    if right:
-        prefix = f"{prefix} · {right}"
+        name = secrets.choice(candidates)
+    except Exception:
+        # Fallback to deterministic selection if secrets not available
+        key = f"{mood}:{int(avg_speed)}:{duration_minutes or 0}"
+        idx = abs(hash(key)) % len(candidates)
+        name = candidates[idx]
 
-    return prefix or "SonicRide Playlist"
+    # Ensure single word, capitalize for display
+    name = "".join(ch for ch in str(name).split()[0] if ch.isalnum())
+    return name or "SonicRide"
 
 
 def main():
@@ -467,19 +815,34 @@ def main():
 Examples:
   python sonicride.py --metrics ride.csv --limit 12
   python sonicride.py --metrics fast_ride.csv --limit 20 --public --debug
-        """
+        """,
     )
-    parser.add_argument("--metrics", default="metrics.csv", 
-                       help="Path to ride metrics CSV file (default: metrics.csv)")
-    parser.add_argument("--limit", type=int, default=15, 
-                       help="Number of tracks in playlist (default: 15)")
-    parser.add_argument("--name-prefix", default="SonicRide Playlist", 
-                       help="Playlist name prefix (default: 'SonicRide Playlist')")
-    parser.add_argument("--public", action="store_true", 
-                       help="Create public playlist (default: private)")
-    parser.add_argument("--debug", action="store_true", 
-                       help="Show detailed debug information")
-    
+    parser.add_argument(
+        "--metrics",
+        default="metrics.csv",
+        help="Path to ride metrics CSV file (default: metrics.csv)",
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=15,
+        help="Number of tracks in playlist (default: 15)",
+    )
+    parser.add_argument(
+        "--name-prefix",
+        default="SonicRide Playlist",
+        help="Playlist name prefix (default: 'SonicRide Playlist')",
+    )
+    parser.add_argument(
+        "--public",
+        action="store_true",
+        help="Create public playlist (default: private)",
+    )
+    parser.add_argument(
+        "--debug", action="store_true", help="Show detailed debug information"
+    )
+    # `--prefs` removed: selection is randomized and genre/mood-driven only
+
     args = parser.parse_args()
 
     # Load and validate metrics
@@ -490,27 +853,34 @@ Examples:
 
     try:
         df = pd.read_csv(metrics_path)
-        speed_series = df.get('speed_kmh')
-        lean_series = df.get('lean_angle_deg')
-        
+        speed_series = df.get("speed_kmh")
+        lean_series = df.get("lean_angle_deg")
+
         if speed_series is None or lean_series is None:
-            print("❌ Error: CSV missing required columns 'speed_kmh' and/or 'lean_angle_deg'", file=sys.stderr)
+            print(
+                "❌ Error: CSV missing required columns 'speed_kmh' and/or 'lean_angle_deg'",
+                file=sys.stderr,
+            )
             sys.exit(1)
-            
-        avg_speed = speed_series.dropna().mean() if not speed_series.dropna().empty else 0.0
-        avg_lean = lean_series.dropna().mean() if not lean_series.dropna().empty else 0.0
-        
+
+        avg_speed = (
+            speed_series.dropna().mean() if not speed_series.dropna().empty else 0.0
+        )
+        avg_lean = (
+            lean_series.dropna().mean() if not lean_series.dropna().empty else 0.0
+        )
+
     except Exception as e:
         print(f"❌ Error reading metrics: {e}", file=sys.stderr)
         sys.exit(1)
 
     # Compute ride duration (seconds). Prefer `dt_s` if present, else fall back to timestamp diff.
     duration_seconds = None
-    if 'dt_s' in df.columns and df['dt_s'].dropna().sum() > 0:
-        duration_seconds = int(df['dt_s'].dropna().sum())
+    if "dt_s" in df.columns and df["dt_s"].dropna().sum() > 0:
+        duration_seconds = int(df["dt_s"].dropna().sum())
     else:
         try:
-            times = pd.to_datetime(df['time'], errors='coerce')
+            times = pd.to_datetime(df["time"], errors="coerce")
             if times.notnull().any():
                 duration_seconds = int((times.max() - times.min()).total_seconds())
         except Exception:
@@ -518,8 +888,8 @@ Examples:
 
     if not duration_seconds or duration_seconds <= 0:
         # Fallback to approximate duration from number of rows assuming dt_s if missing
-        if 'dt_s' in df.columns:
-            duration_seconds = int(df['dt_s'].fillna(0).sum()) or max(60, len(df) * 30)
+        if "dt_s" in df.columns:
+            duration_seconds = int(df["dt_s"].fillna(0).sum()) or max(60, len(df) * 30)
         else:
             duration_seconds = max(60, len(df) * 30)
 
@@ -528,13 +898,15 @@ Examples:
 
     # Analyze ride
     print(f"🏍️  Ride Analysis: {avg_speed:.1f} km/h avg speed, {avg_lean:.1f}° avg lean")
-    
+
     mood = determine_mood(avg_speed, avg_lean)
     genres, target_energy, target_tempo = get_mood_parameters(mood)
-    
+
     print(f"🎵 Ride mood: {mood}")
     if args.debug:
-        print(f"[DEBUG] Target: {genres} genres, {target_energy} energy, {target_tempo} BPM")
+        print(
+            f"[DEBUG] Target: {genres} genres, {target_energy} energy, {target_tempo} BPM"
+        )
 
     # Provide a generated playlist prefix when the user didn't override it
     if args.name_prefix == "SonicRide Playlist":
@@ -545,34 +917,122 @@ Examples:
     client_secret = os.getenv("SPOTIFY_CLIENT_SECRET")
     redirect_uri = os.getenv("SPOTIFY_REDIRECT_URI", "http://127.0.0.1:8888/callback")
 
-    missing = [name for name, val in [("SPOTIFY_CLIENT_ID", client_id), ("SPOTIFY_CLIENT_SECRET", client_secret)] if not val]
+    missing = [
+        name
+        for name, val in [
+            ("SPOTIFY_CLIENT_ID", client_id),
+            ("SPOTIFY_CLIENT_SECRET", client_secret),
+        ]
+        if not val
+    ]
     if missing:
-        print(f"❌ Missing environment variables: {', '.join(missing)}", file=sys.stderr)
-        print("💡 Create a .env file with SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET", file=sys.stderr)
+        print(
+            f"❌ Missing environment variables: {', '.join(missing)}", file=sys.stderr
+        )
+        print(
+            "💡 Create a .env file with SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     # Initialize Spotify clients
     try:
-        client_creds_sp = spotipy.Spotify(client_credentials_manager=SpotifyClientCredentials(
-            client_id=client_id, client_secret=client_secret
-        ))
-        
+        client_creds_sp = spotipy.Spotify(
+            client_credentials_manager=SpotifyClientCredentials(
+                client_id=client_id, client_secret=client_secret
+            )
+        )
+
         # Request full user scopes required for playlist creation and optional playback control
         scope_parts = [
             "playlist-modify-private",
             "playlist-modify-public",
             "user-read-private",
+            "user-top-read",
             "user-modify-playback-state",
+            # Required for uploading user-provided images to playlists
+            "ugc-image-upload",
         ]
         scope = " ".join(scope_parts)
 
-        oauth_sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
-            client_id=client_id,
-            client_secret=client_secret,
-            redirect_uri=redirect_uri,
-            scope=scope
-        ))
-        
+        oauth_sp = spotipy.Spotify(
+            auth_manager=SpotifyOAuth(
+                client_id=client_id,
+                client_secret=client_secret,
+                redirect_uri=redirect_uri,
+                scope=scope,
+            )
+        )
+        # If debug mode, show cached token info (no raw tokens printed)
+        try:
+            if args.debug:
+                get_cached = getattr(oauth_sp.auth_manager, "get_cached_token", None)
+                token_info = get_cached() if callable(get_cached) else None
+                if token_info:
+                    scopes = token_info.get("scope") or token_info.get("scopes") or ""
+                    expiry = token_info.get("expires_at")
+                    now = int(time.time())
+                    expired = bool(expiry and expiry <= now)
+                    print(
+                        f"[DEBUG] Spotify token: present, expires_at={expiry}, expired={expired}, scopes={scopes}"
+                    )
+                else:
+                    print(
+                        "[DEBUG] No cached Spotify token found (interactive auth may be required)."
+                    )
+        except Exception as e:
+            if args.debug:
+                print(f"[DEBUG] Unable to read cached token info: {e}")
+        # Ensure the cached token includes the image upload scope; if not,
+        # remove the cache and force re-auth so the user can grant it.
+        try:
+            if args.debug:
+                # Re-fetch token_info safely
+                get_cached = getattr(oauth_sp.auth_manager, "get_cached_token", None)
+                token_info = get_cached() if callable(get_cached) else None
+            else:
+                token_info = None
+
+            has_scope = False
+            if token_info:
+                token_scopes = token_info.get("scope") or token_info.get("scopes") or ""
+                has_scope = "ugc-image-upload" in token_scopes
+
+            if token_info and not has_scope:
+                # Attempt to remove cache file
+                cache_path = getattr(oauth_sp.auth_manager, "cache_path", None)
+                try:
+                    if cache_path and os.path.exists(cache_path):
+                        os.remove(cache_path)
+                        if args.debug:
+                            print(
+                                "[DEBUG] Removed cached token missing 'ugc-image-upload'; forcing re-auth"
+                            )
+                except Exception as e:
+                    if args.debug:
+                        print(f"[DEBUG] Failed to remove cache file: {e}")
+
+                # Recreate auth manager to prompt for fresh auth with required scopes
+                try:
+                    oauth_sp = spotipy.Spotify(
+                        auth_manager=SpotifyOAuth(
+                            client_id=client_id,
+                            client_secret=client_secret,
+                            redirect_uri=redirect_uri,
+                            scope=scope,
+                        )
+                    )
+                    if args.debug:
+                        print(
+                            "[DEBUG] Re-created Spotify auth manager to acquire missing scopes"
+                        )
+                except Exception as e:
+                    if args.debug:
+                        print(f"[DEBUG] Re-auth failed: {e}")
+        except Exception:
+            # Non-fatal; continue with whatever auth state is present
+            pass
+
     except Exception as e:
         print(f"❌ Spotify authentication failed: {e}", file=sys.stderr)
         sys.exit(1)
@@ -581,7 +1041,7 @@ Examples:
     print("🎯 Searching for perfect tracks...")
     if args.debug:
         print("💡 Note: Using smart search for robust results")
-    
+
     # Estimate how many tracks we'll need to cover the ride duration.
     # Use average track length ~180s and add a safety multiplier.
     est_per_track = 180
@@ -589,21 +1049,30 @@ Examples:
     # Allow user override via --limit; otherwise use estimated number
     search_limit = args.limit if args.limit and args.limit > est_needed else est_needed
 
+    # Preferences removed — search driven only by mood/genres and randomized selection
     tracks = search_and_score_tracks(
-        client_creds_sp, genres, mood, search_limit,
-        target_energy, target_tempo, args.debug
+        client_creds_sp,
+        genres,
+        mood,
+        search_limit,
+        target_energy,
+        target_tempo,
+        args.debug,
+        user_prefs=None,
     )
+
+    # No preference-based prepending; keep tracks from search results
 
     # Select tracks until we reach ride duration (use track['duration_ms']).
     selected = []
     total_sec = 0
     seen = set()
     for t in tracks:
-        tid = t.get('id')
+        tid = t.get("id")
         if not tid or tid in seen:
             continue
         seen.add(tid)
-        dur = t.get('duration_ms') or 180000
+        dur = t.get("duration_ms") or 180000
         dur_s = int(dur / 1000)
         selected.append(t)
         total_sec += dur_s
@@ -613,18 +1082,26 @@ Examples:
     # If not enough duration, try to fetch more candidates (larger search) once.
     if total_sec < duration_seconds:
         if args.debug:
-            print(f"[DEBUG] Collected {total_sec}s, need {duration_seconds}s — expanding search")
+            print(
+                f"[DEBUG] Collected {total_sec}s, need {duration_seconds}s — expanding search"
+            )
         more_limit = max(search_limit * 2, 30)
         more_tracks = search_and_score_tracks(
-            client_creds_sp, genres, mood, more_limit,
-            target_energy, target_tempo, args.debug
+            client_creds_sp,
+            genres,
+            mood,
+            more_limit,
+            target_energy,
+            target_tempo,
+            args.debug,
+            user_prefs=None,
         )
         for t in more_tracks:
-            tid = t.get('id')
+            tid = t.get("id")
             if not tid or tid in seen:
                 continue
             seen.add(tid)
-            dur = t.get('duration_ms') or 180000
+            dur = t.get("duration_ms") or 180000
             dur_s = int(dur / 1000)
             selected.append(t)
             total_sec += dur_s
@@ -632,7 +1109,13 @@ Examples:
                 break
 
     tracks = selected
-    
+    # Shuffle final track order so repeated runs with identical input
+    # still produce different playlists. Use OS entropy for randomness.
+    try:
+        random.seed(None)
+        random.shuffle(tracks)
+    except Exception:
+        print("[DEBUG] Final shuffle failed; proceeding with original order")
     if not tracks:
         print("❌ No suitable tracks found", file=sys.stderr)
         sys.exit(1)
@@ -642,20 +1125,27 @@ Examples:
     # Create playlist
     try:
         playlist_url = create_playlist(
-            oauth_sp, tracks, mood, target_energy, target_tempo,
-            args.name_prefix, args.public, debug=args.debug
+            oauth_sp,
+            tracks,
+            mood,
+            target_energy,
+            target_tempo,
+            args.name_prefix,
+            genres=genres,
+            public=args.public,
+            debug=args.debug,
         )
-        
+
         print(f"🎶 Playlist created: {playlist_url}")
-        
+
         if args.debug:
             print("\n📝 Tracks added:")
             for i, track in enumerate(tracks, 1):
-                artist_names = ", ".join(a['name'] for a in track['artists'])
+                artist_names = ", ".join(a["name"] for a in track["artists"])
                 print(f"   {i:2d}. {track['name']} by {artist_names}")
         else:
-            print(f"📝 Added {len(tracks)} tracks to your {mood} riding playlist")
-            
+            print(f"📝 Added {len(tracks)} tracks to your {mood} " f"riding playlist")
+
     except Exception as e:
         print(f"❌ Failed to create playlist: {e}", file=sys.stderr)
         sys.exit(1)
