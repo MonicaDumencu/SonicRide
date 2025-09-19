@@ -56,6 +56,18 @@ def install_web_requirements():
     
     print("✅ Web dependencies installation complete")
 
+    # Install full requirements.txt if present to ensure all packages are available
+    req_path = Path("requirements.txt")
+    if req_path.exists():
+        print("📦 Installing packages from requirements.txt...")
+        try:
+            subprocess.run([pip_exe, "install", "-r", str(req_path)], check=True)
+            print("✅ requirements.txt installed")
+        except subprocess.CalledProcessError:
+            print("⚠️  Failed to install some packages from requirements.txt")
+    else:
+        print("⚠️  No requirements.txt found; skipping full requirements install")
+
 def verify_installation():
     """Verify that all required packages are available"""
     python_exe = get_python_exe()
