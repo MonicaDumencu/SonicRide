@@ -745,22 +745,22 @@ body {
 }
 
 .playlist-icon {
-    width: 64px;
-    height: 64px;
+    width: 80px;
+    height: 80px;
     background: var(--primary-color);
     border-radius: var(--border-radius);
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 28px;
+    font-size: 32px;
     color: white;
     flex-shrink: 0;
     overflow: hidden;
 }
 
 .playlist-cover-image {
-    width: 64px;
-    height: 64px;
+    width: 80px;
+    height: 80px;
     border-radius: var(--border-radius);
     object-fit: cover;
     transition: transform 0.2s ease;
