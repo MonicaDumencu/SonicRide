@@ -18,6 +18,11 @@ import pandas as pd
 import requests
 import spotipy
 from spotipy.oauth2 import SpotifyClientCredentials, SpotifyOAuth
+try:
+    # Optional dependency for language detection of track titles
+    from langdetect import detect_langs
+except Exception:
+    detect_langs = None
 
 try:
     from dotenv import load_dotenv
@@ -863,7 +868,6 @@ Examples:
     parser.add_argument(
         "--debug", action="store_true", help="Show detailed debug information"
     )
-    # `--prefs` removed: selection is randomized and genre/mood-driven only
 
     args = parser.parse_args()
 
@@ -1141,6 +1145,97 @@ Examples:
     if not tracks:
         print("❌ No suitable tracks found", file=sys.stderr)
         sys.exit(1)
+
+    # Always apply English-only filtering (best-effort). If `langdetect` is
+    # unavailable, warn and proceed without filtering.
+    if detect_langs is None:
+        print(
+            "⚠️  'langdetect' not installed; cannot apply English-only filter.\nInstall with: pip install langdetect",
+            file=sys.stderr,
+        )
+    else:
+            def is_english_track(track, min_prob=0.75):
+                # Build a combined text using title, artist names and album name
+                parts = []
+                title = (track.get("name") or "").strip()
+                if title:
+                    parts.append(title)
+                # artist names
+                try:
+                    artists = [a.get("name", "") for a in track.get("artists", [])]
+                    artists = [a for a in artists if a]
+                    if artists:
+                        parts.append(" ".join(artists))
+                except Exception:
+                    pass
+                # album name (some search results include album info)
+                try:
+                    album = track.get("album", {}).get("name") if track.get("album") else None
+                    if album:
+                        parts.append(album)
+                except Exception:
+                    pass
+
+                if not parts:
+                    return False
+
+                combined = " - ".join(parts)
+
+                def detect_text(text):
+                    try:
+                        langs = detect_langs(text)
+                        if not langs:
+                            return None, 0.0
+                        top = langs[0]
+                        code = getattr(top, "lang", None) or str(top).split(":")[0]
+                        prob = getattr(top, "prob", None)
+                        if prob is None:
+                            try:
+                                prob = float(str(top).split(":")[1])
+                            except Exception:
+                                prob = 0.0
+                        return code, float(prob)
+                    except Exception:
+                        return None, 0.0
+
+                # Prefer combined detection for better context
+                code, prob = detect_text(combined)
+                if code == "en" and prob >= min_prob:
+                    return True
+
+                # If combined is ambiguous, fall back to title-only detection
+                if title:
+                    code_t, prob_t = detect_text(title)
+                    if code_t == "en" and prob_t >= min_prob:
+                        return True
+
+                return False
+
+            orig_count = len(tracks)
+            tracks = [t for t in tracks if is_english_track(t)]
+            if args.debug:
+                print(f"[DEBUG] Filtered tracks to English-only: {len(tracks)}/{orig_count} kept")
+
+            if not tracks:
+                print(
+                    "❌ After applying English-only filter no tracks remain. Expanding search and preferring English tracks.",
+                    file=sys.stderr,
+                )
+                try:
+                    more_tracks = search_and_score_tracks(
+                        client_creds_sp,
+                        genres,
+                        mood,
+                        max(search_limit * 2, 30),
+                        target_energy,
+                        target_tempo,
+                        args.debug,
+                        user_prefs=None,
+                    )
+                    eng = [t for t in more_tracks if is_english_track(t)]
+                    tracks = eng if eng else more_tracks
+                except Exception:
+                    pass
 
     print(f"✅ Found {len(tracks)} perfect tracks")
 
